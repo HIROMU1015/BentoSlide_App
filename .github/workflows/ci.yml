@@ -281,8 +281,14 @@ jobs:
             $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
             $listener.Start()
             $busyPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
-            $conflictOutput = (& .\start_bentoslide_app.cmd -Port $busyPort -NoBrowser -NoClipboard 2>&1 | Out-String)
-            if ($LASTEXITCODE -eq 0) { throw "BentoSlide App accepted a conflicting port" }
+            $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+            try {
+              $PSNativeCommandUseErrorActionPreference = $false
+              $conflictOutput = (& .\start_bentoslide_app.cmd -Port $busyPort -NoBrowser -NoClipboard 2>&1 | Out-String)
+              $conflictExitCode = $LASTEXITCODE
+            }
+            finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+            if ($conflictExitCode -eq 0) { throw "BentoSlide App accepted a conflicting port" }
             if ($conflictOutput -notmatch "used by another service") { throw "Unexpected port-conflict error: $conflictOutput" }
             if ((Test-Path $pidPath) -or (Test-Path $sessionPath)) { throw "Port conflict left app session files" }
           }
