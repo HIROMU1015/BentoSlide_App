@@ -322,7 +322,6 @@ jobs:
           Set-Location $copy
           $wholeDeckState = Join-Path $env:RUNNER_TEMP "whole-deck-html-review.yaml"
           Copy-Item deck.yaml $wholeDeckState
-          Copy-Item tests/fixtures/deck_v2.initialized.yaml deck.yaml
           New-Item -ItemType Directory -Force output/diagnostics | Out-Null
           Copy-Item demo.bento.html output/presentation.generated.bento.html
           Set-Content output/diagnostics/merged-registry.json "{}" -Encoding utf8
@@ -381,6 +380,7 @@ jobs:
             }
           }
           finally { $conflictListener.Stop() }
+          Copy-Item tests/fixtures/deck_v2.initialized.yaml deck.yaml
           $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_deck_workspace.cmd") "-NoClipboard"
           if ($exitCode -ne 0) { throw "initialized start_deck_workspace.cmd failed: $exitCode" }
           if ((Test-Path output/html-preview-session.json) -or (Test-Path output/work-editor-session.json)) {
@@ -467,7 +467,7 @@ jobs:
         shell: pwsh
         run: |
           $copy = Join-Path $env:RUNNER_TEMP "Bento Slide 論文スライド"
-          $appStop = Join-Path $copy "scripts/stop_bentoslide_app.ps1"
+          $appStop = Join-Path $copy "stop_bentoslide_app.cmd"
           if ((Test-Path $appStop) -and (Test-Path (Join-Path $copy "output/bentoslide-app-session.json"))) {
             & $appStop
           }
