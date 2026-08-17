@@ -10,6 +10,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from app.backend.main import create_app
+from app.backend.services.editor_session_service import WorkEditorSession
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService, ui_mode_for_stage, verified_local_session_url
 from scripts.deck_workflow import WorkflowError, load_state
@@ -206,7 +207,7 @@ class WorkflowServiceViewTests(unittest.TestCase):
         }
         with mock.patch("app.backend.services.workflow_service.load_state", return_value=state), \
              mock.patch("app.backend.services.workflow_service.user_status_summary", return_value={"current": "Bento編集中", "next": "確認", "route": "authoring-editor", "validActions": [], "blockingReason": None}), \
-             mock.patch("app.backend.services.workflow_service.verified_local_session_url", return_value="http://127.0.0.1:9876/"):
+             mock.patch("app.backend.services.workflow_service.inspect_work_editor_session", return_value=WorkEditorSession(mode="authoring", url="http://127.0.0.1:9876/")):
             view = service.state_view()
         self.assertEqual(view.mode, "bento-edit")
         self.assertTrue(view.canEditBento)

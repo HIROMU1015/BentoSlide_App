@@ -12,14 +12,17 @@ from app.backend.models.view_models import (
     ApplyHtmlRequest,
     ApproveHtmlDeckRequest,
     BentoIntegrationResponse,
+    ConfirmedLifecycleRequest,
     ConversionStatusResponse,
     HtmlReviewResponse,
+    LifecycleStatusResponse,
     ProjectResponse,
     SlidesResponse,
     StateResponse,
     StartConversionRequest,
 )
 from app.backend.services.bento_service import BentoService
+from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService
@@ -28,6 +31,7 @@ from app.backend.services.workflow_service import WorkflowService
 def create_api_router(
     *, repository: Path, workflow: WorkflowService, html_review: HtmlReviewService, bento: BentoService,
     conversion: ConversionService,
+    lifecycle: BentoLifecycleService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -80,6 +84,45 @@ def create_api_router(
     @router.get("/convert/status", response_model=ConversionStatusResponse)
     def conversion_status() -> ConversionStatusResponse:
         return conversion.status()
+
+    @router.get("/bento/lifecycle/status", response_model=LifecycleStatusResponse)
+    def lifecycle_status() -> LifecycleStatusResponse:
+        return lifecycle.status()
+
+    @router.post(
+        "/bento/content/review", response_model=LifecycleStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def begin_content_review(_request: ConfirmedLifecycleRequest) -> LifecycleStatusResponse:
+        return lifecycle.start("content-review")
+
+    @router.post(
+        "/bento/content/approve", response_model=LifecycleStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def approve_content(_request: ConfirmedLifecycleRequest) -> LifecycleStatusResponse:
+        return lifecycle.start("content-approve")
+
+    @router.post(
+        "/bento/final/approve", response_model=LifecycleStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def approve_final(_request: ConfirmedLifecycleRequest) -> LifecycleStatusResponse:
+        return lifecycle.start("final-approve")
+
+    @router.post(
+        "/bento/final/reopen", response_model=LifecycleStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def reopen_final(_request: ConfirmedLifecycleRequest) -> LifecycleStatusResponse:
+        return lifecycle.start("final-reopen")
+
+    @router.post(
+        "/bento/final/open", response_model=LifecycleStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def open_final(_request: ConfirmedLifecycleRequest) -> LifecycleStatusResponse:
+        return lifecycle.start("final-open")
 
     safe_headers = {
         "Cache-Control": "no-store",

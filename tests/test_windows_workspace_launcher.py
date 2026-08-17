@@ -16,9 +16,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import yaml
+from fastapi.testclient import TestClient
 
+from app.backend.main import create_app
 from bento_converter.html_document import embed_bento_doc, extract_bento_doc, load_html
-from tests.finalization_fixture import prepare_finalization_fixture
+from tests.finalization_fixture import prepare_authoring_fixture, prepare_finalization_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -130,6 +132,21 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
             except (OSError, URLError, json.JSONDecodeError):
                 time.sleep(0.1)
         raise AssertionError(f"No status response on port {port}")
+
+    @staticmethod
+    def wait_lifecycle(
+        client: TestClient, action: str, *, timeout: float = 120,
+    ) -> dict:
+        deadline = time.monotonic() + timeout
+        last: dict = {}
+        while time.monotonic() < deadline:
+            response = client.get("/api/bento/lifecycle/status")
+            if response.status_code == 200:
+                last = response.json()
+                if last.get("action") == action and last.get("status") in {"succeeded", "failed"}:
+                    return last
+            time.sleep(0.1)
+        raise AssertionError(f"Lifecycle action {action} did not finish: {last}")
 
     def test_preview_cmd_start_duplicate_traversal_stop(self) -> None:
         repository = self.copy_repository("Bento Preview")
@@ -317,6 +334,46 @@ class WindowsWorkspaceLauncherTests(unittest.TestCase):
             {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in protected_paths},
             protected_hashes,
         )
+
+    def test_app_api_runs_authoring_review_finalization_complete_and_reopen(self) -> None:
+        repository = self.copy_repository("Bento App Lifecycle 日本語 path")
+        port = self.free_port()
+        prepare_authoring_fixture(
+            repository, bento_port=port, confirm_disposable=True,
+        )
+        started = self.run_cmd(repository / "start_deck_workspace.cmd", "-NoClipboard")
+        self.assertEqual(started.returncode, 0, started.stdout)
+        self.assertEqual(self.wait_status(port)["editingMode"], "authoring")
+
+        with TestClient(create_app(repository, frontend_dist=repository / "missing-frontend")) as client:
+            review = client.post("/api/bento/content/review", json={"confirmed": True})
+            self.assertEqual(review.status_code, 202, review.text)
+            review_status = self.wait_lifecycle(client, "content-review")
+            self.assertEqual(review_status["status"], "succeeded", review_status)
+            self.assertEqual(review_status["stage"], "content_review")
+            self.assertEqual(self.wait_status(port)["editingMode"], "authoring")
+
+            content = client.post("/api/bento/content/approve", json={"confirmed": True})
+            self.assertEqual(content.status_code, 202, content.text)
+            content_status = self.wait_lifecycle(client, "content-approve")
+            self.assertEqual(content_status["status"], "succeeded", content_status)
+            self.assertEqual(content_status["stage"], "bento_finalization")
+            self.assertEqual(self.wait_status(port)["editingMode"], "finalization")
+
+            final = client.post("/api/bento/final/approve", json={"confirmed": True})
+            self.assertEqual(final.status_code, 202, final.text)
+            final_status = self.wait_lifecycle(client, "final-approve")
+            self.assertEqual(final_status["status"], "succeeded", final_status)
+            self.assertEqual(final_status["stage"], "complete")
+            self.assertFalse((repository / "output/work-editor-session.json").exists())
+            self.assertFalse((repository / "output/work-editor.pid").exists())
+
+            reopen = client.post("/api/bento/final/reopen", json={"confirmed": True})
+            self.assertEqual(reopen.status_code, 202, reopen.text)
+            reopen_status = self.wait_lifecycle(client, "final-reopen")
+            self.assertEqual(reopen_status["status"], "succeeded", reopen_status)
+            self.assertEqual(reopen_status["stage"], "bento_finalization")
+            self.assertEqual(self.wait_status(port)["editingMode"], "finalization")
 
     def test_bento_authoring_dispatch_uses_v2_custom_artifact_paths(self) -> None:
         repository = self.copy_repository("Bento Authoring 日本語")

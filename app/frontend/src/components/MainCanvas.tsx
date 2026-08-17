@@ -8,6 +8,7 @@ type Props = {
   selectedSlide: string | null
   onViewChange: (view: HtmlView) => void
   bento: BentoIntegration | null
+  transitioning?: boolean
 }
 
 function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Omit<Props, 'state' | 'bento'>) {
@@ -97,8 +98,11 @@ function EmptyCanvas({ title, detail }: { title: string; detail: string }) {
 }
 
 export function MainCanvas(props: Props) {
-  const { state, bento } = props
+  const { state, bento, transitioning } = props
   if (state.mode === 'html-design') return <HtmlCanvas {...props} />
+  if (transitioning && (state.mode === 'bento-edit' || state.mode === 'final-edit')) {
+    return <EmptyCanvas title="BentoSlideを更新しています" detail="編集画面を安全に切り替えています。" />
+  }
   const editorUrl = bento?.available ? bento.editorUrl : state.bentoEditorUrl
   if ((state.mode === 'bento-edit' || state.mode === 'final-edit') && editorUrl) {
     return (

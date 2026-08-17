@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
-import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -21,6 +19,7 @@ from scripts.deck_workflow import (
 )
 
 from app.backend.models.view_models import ConversionPhase, ConversionStatusResponse
+from app.backend.services.editor_session_service import launch_existing_work_editor
 
 
 LOGGER = logging.getLogger(__name__)
@@ -30,54 +29,11 @@ WorkflowCommand = Callable[[Path, dict[str, Any]], None]
 EditorLauncher = Callable[[Path], None]
 
 
-def _record_managed_editor(repository: Path, *, editor_existed: bool) -> None:
-    if editor_existed:
-        return
-    app_session = repository / "output/bentoslide-app-session.json"
-    editor_session = repository / "output/work-editor-session.json"
-    if not app_session.is_file() or not editor_session.is_file():
-        return
-    try:
-        payload = json.loads(app_session.read_text(encoding="utf-8-sig"))
-        if (
-            not isinstance(payload, dict)
-            or payload.get("format") != "bento/application-session/v1"
-            or Path(str(payload.get("repository") or "")).resolve() != repository.resolve()
-            or payload.get("managedEngine") not in {None, ""}
-        ):
-            return
-        payload["managedEngine"] = "work-editor"
-        temporary = app_session.with_name(f".{app_session.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, app_session)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        LOGGER.warning("Could not record the Work editor as App-managed", exc_info=True)
-
-
-def launch_existing_work_editor(repository: Path) -> None:
-    """Use the existing workspace launcher; do not reproduce Work editor setup here."""
-
-    if os.name != "nt":
-        return
-    script = repository / "scripts/start_deck_workspace.ps1"
-    editor_session = repository / "output/work-editor-session.json"
-    editor_existed = editor_session.is_file()
-    completed = subprocess.run(
-        [
-            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
-            "-NoClipboard",
-        ],
-        cwd=repository,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=90,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("The existing Bento Work editor launcher did not complete successfully")
-    _record_managed_editor(repository, editor_existed=editor_existed)
+def _launch_conversion_editor(repository: Path) -> None:
+    # Conversion remains usable on non-Windows hosts; only the Windows App
+    # launcher can attach the existing Work editor automatically.
+    if os.name == "nt":
+        launch_existing_work_editor(repository)
 
 
 class ConversionService:
@@ -95,7 +51,7 @@ class ConversionService:
         build: BuildFunction = build_from_html,
         mark_converted: WorkflowCommand = command_mark_converted,
         begin_authoring: WorkflowCommand = command_begin_authoring,
-        launch_editor: EditorLauncher = launch_existing_work_editor,
+        launch_editor: EditorLauncher = _launch_conversion_editor,
     ) -> None:
         self.repository = Path(repository).resolve()
         self._state_loader = state_loader

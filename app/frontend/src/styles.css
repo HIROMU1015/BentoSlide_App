@@ -118,6 +118,13 @@ button { color: inherit; }
 .conversion-error { padding: 10px; border: 1px solid #fecaca; border-radius: 8px; background: #fef2f2; color: var(--danger); }
 .conversion-error strong { font-size: 10px; }
 .conversion-error p { margin-top: 4px; color: var(--danger); }
+.lifecycle-panel { display: grid; gap: 10px; }
+.lifecycle-panel h3 { margin: 0; font-size: 14px; line-height: 1.4; }
+.completion-actions { display: grid; gap: 8px; }
+.completion-actions p { margin: 0 0 2px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.secondary-button { width: 100%; border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px 12px; background: #fff; color: #475569; font-size: 12px; font-weight: 700; cursor: pointer; }
+.secondary-button:hover:not(:disabled) { border-color: #94a3b8; background: #f8fafc; }
+.secondary-button:disabled { cursor: not-allowed; opacity: .55; }
 @keyframes conversion-spin { to { transform: rotate(360deg); } }
 
 .workflow-bar { display: grid; grid-template-columns: 280px minmax(0,1fr) auto; align-items: center; gap: 16px; padding: 0 16px; background: #fff; border-top: 1px solid var(--line); color: #475569; }

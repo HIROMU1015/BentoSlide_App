@@ -15,6 +15,8 @@ from app.backend.models.view_models import (
     StateResponse,
     UiMode,
 )
+from app.backend.services.editor_session_service import inspect_work_editor_session
+from scripts.deck_workflow import WorkflowError
 
 
 STAGE_TO_MODE: dict[str, UiMode] = {
@@ -86,14 +88,16 @@ class WorkflowService:
         state = self.state()
         stage = str(state["workflow"]["stage"])
         summary = user_status_summary(state)
-        port = int(state.get("preview", {}).get("bentoPort") or 8765)
         bento_stages = {"bento_authoring", "content_review", "bento_finalization"}
-        editor_url = verified_local_session_url(
-            self.repository,
-            filename="work-editor-session.json",
-            expected_format="bento/work-editor-session/v1",
-            expected_port=port,
-        ) if stage in bento_stages else None
+        editor_url = None
+        if stage in bento_stages:
+            try:
+                session = inspect_work_editor_session(self.repository, state)
+                expected_mode = "finalization" if stage == "bento_finalization" else "authoring"
+                if session is not None and session.mode == expected_mode:
+                    editor_url = session.url
+            except WorkflowError:
+                editor_url = None
         return StateResponse(
             mode=ui_mode_for_stage(stage),
             stage=stage,

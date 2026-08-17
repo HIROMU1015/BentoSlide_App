@@ -1,15 +1,19 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { getConversionStatus, loadAppData, startConversion } from './api/client'
-import type { AppState, ConversionStatus, HtmlReview, HtmlView } from './types'
+import {
+  getConversionStatus, getLifecycleStatus, loadAppData, startConversion, startLifecycleAction,
+} from './api/client'
+import type { AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus } from './types'
 
 vi.mock('./api/client', () => ({
   applyHtmlChange: vi.fn(),
   approveHtmlDeck: vi.fn(),
   getConversionStatus: vi.fn(),
+  getLifecycleStatus: vi.fn(),
   loadAppData: vi.fn(),
   startConversion: vi.fn(),
+  startLifecycleAction: vi.fn(),
 }))
 
 const idleConversion: ConversionStatus = {
@@ -20,6 +24,12 @@ const idleConversion: ConversionStatus = {
   message: '変換を開始できます',
   error: null,
   retryable: false,
+}
+
+const idleLifecycle: LifecycleStatus = {
+  status: 'idle', action: null, phase: null, stage: 'html_review',
+  completedSteps: 0, totalSteps: 1, message: '待機中', error: null, retryable: false,
+  availableActions: [],
 }
 
 const appState: AppState = {
@@ -46,11 +56,16 @@ const review: HtmlReview = {
 
 beforeEach(() => {
   vi.mocked(getConversionStatus).mockResolvedValue(idleConversion)
+  vi.mocked(getLifecycleStatus).mockResolvedValue(idleLifecycle)
   vi.mocked(startConversion).mockResolvedValue({
     ...idleConversion,
     status: 'running',
     phase: 'validating',
     message: '承認済みHTMLを確認しています',
+  })
+  vi.mocked(startLifecycleAction).mockResolvedValue({
+    ...idleLifecycle, status: 'running', action: 'content-review', phase: 'stopping-editor',
+    stage: 'bento_authoring', totalSteps: 3, message: '編集画面を停止しています',
   })
   vi.mocked(loadAppData).mockImplementation(async (view: HtmlView = 'current') => ({
     project: { project: { title: 'Fixture', kind: 'fixture' } },
@@ -133,7 +148,7 @@ describe('App conversion workflow', () => {
 
     expect(await screen.findByText('BentoSlideへ変換中')).toBeInTheDocument()
     expect(screen.getByText('1 / 4')).toBeInTheDocument()
-    expect(screen.getByText('処理中')).toBeInTheDocument()
+    expect(screen.getAllByText('処理中')).toHaveLength(2)
   })
 
   it('shows a failed reason and retries after confirmation', async () => {
@@ -185,5 +200,85 @@ describe('App conversion workflow', () => {
 
     expect(await screen.findByTitle('Bento編集画面')).toHaveAttribute('src', 'http://127.0.0.1:8765/')
     expect(loadAppData).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('App Bento lifecycle workflow', () => {
+  const authoringState: AppState = {
+    ...appState,
+    mode: 'bento-edit',
+    stage: 'bento_authoring',
+    canEditBento: true,
+    hasCandidate: false,
+    bentoEditorUrl: 'http://127.0.0.1:8765/',
+  }
+
+  function appData(state: AppState, editorUrl: string | null) {
+    return {
+      project: { project: { title: '承認テスト', kind: 'fixture' } },
+      state,
+      review: null,
+      bento: { available: Boolean(editorUrl), editorUrl, message: editorUrl ? '編集できます' : '準備中' },
+      slideView: 'current' as const,
+      slides: [{ id: 'slide-1', title: 'Slide', number: 1, sectionTitle: null }],
+    }
+  }
+
+  it('does not call a lifecycle API without confirmation', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(appData(authoringState, 'http://127.0.0.1:8765/'))
+    vi.mocked(getLifecycleStatus).mockResolvedValue({
+      ...idleLifecycle, stage: 'bento_authoring', availableActions: ['content-review'],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '内容確認へ進む' }))
+
+    expect(startLifecycleAction).not.toHaveBeenCalled()
+  })
+
+  it('polls lifecycle status, hides the stale iframe, and loads the new editor session', async () => {
+    const contentReviewState: AppState = { ...authoringState, stage: 'content_review' }
+    const idleAuthoring: LifecycleStatus = {
+      ...idleLifecycle, stage: 'bento_authoring', availableActions: ['content-review'],
+    }
+    const running: LifecycleStatus = {
+      ...idleAuthoring, status: 'running', action: 'content-review', phase: 'stopping-editor',
+      totalSteps: 3, message: '編集画面を停止しています', availableActions: [],
+    }
+    const succeeded: LifecycleStatus = {
+      ...running, status: 'succeeded', phase: 'complete', stage: 'content_review',
+      completedSteps: 3, message: '内容確認を開始しました。', availableActions: ['content-approve'],
+    }
+    vi.mocked(loadAppData)
+      .mockResolvedValueOnce(appData(authoringState, 'http://127.0.0.1:8765/'))
+      .mockResolvedValue(appData(contentReviewState, 'http://127.0.0.1:9876/'))
+    vi.mocked(getLifecycleStatus).mockResolvedValueOnce(idleAuthoring).mockResolvedValue(succeeded)
+    vi.mocked(startLifecycleAction).mockResolvedValue(running)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '内容確認へ進む' }))
+
+    expect(await screen.findByTitle('Bento編集画面')).toHaveAttribute('src', 'http://127.0.0.1:9876/')
+    expect(startLifecycleAction).toHaveBeenCalledWith('content-review')
+    expect(loadAppData).toHaveBeenCalledTimes(2)
+  })
+
+  it('can reopen finalization from the completion screen', async () => {
+    const completeState: AppState = {
+      ...authoringState, mode: 'complete', stage: 'complete', canEditBento: false, bentoEditorUrl: null,
+    }
+    vi.mocked(loadAppData).mockResolvedValue(appData(completeState, null))
+    vi.mocked(getLifecycleStatus).mockResolvedValue({
+      ...idleLifecycle, stage: 'complete', availableActions: ['final-open', 'final-reopen'],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '最終調整を再開' }))
+
+    await waitFor(() => expect(startLifecycleAction).toHaveBeenCalledWith('final-reopen'))
+    expect(window.confirm).toHaveBeenCalledWith('最終承認を解除して最終調整を再開しますか？')
   })
 })

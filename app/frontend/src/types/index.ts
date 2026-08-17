@@ -46,6 +46,38 @@ export type ConversionStatus = {
   retryable: boolean
 }
 
+export type LifecycleAction =
+  | 'content-review'
+  | 'content-approve'
+  | 'final-approve'
+  | 'final-reopen'
+  | 'final-open'
+
+export type LifecyclePhase =
+  | 'stopping-editor'
+  | 'validating-content'
+  | 'approving-content'
+  | 'initializing-final'
+  | 'starting-editor'
+  | 'approving-final'
+  | 'completing'
+  | 'reopening-final'
+  | 'opening-final'
+  | 'complete'
+
+export type LifecycleStatus = {
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  action: LifecycleAction | null
+  phase: LifecyclePhase | null
+  stage: string
+  completedSteps: number
+  totalSteps: number
+  message: string
+  error: string | null
+  retryable: boolean
+  availableActions: LifecycleAction[]
+}
+
 export type SlideItem = {
   id: string
   title: string

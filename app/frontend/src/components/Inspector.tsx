@@ -1,4 +1,8 @@
-import type { AppState, ConversionStatus, HtmlReview, ReviewMark, ReviewMarks, SlideItem } from '../types'
+import type {
+  AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
+  ReviewMark, ReviewMarks, SlideItem,
+} from '../types'
+import { BentoLifecyclePanel } from './BentoLifecyclePanel'
 import { ConversionPanel } from './ConversionPanel'
 import { HtmlReviewPanel } from './HtmlReviewPanel'
 
@@ -10,6 +14,7 @@ type Props = {
   marks: ReviewMarks
   busy: boolean
   conversion: ConversionStatus | null
+  lifecycle: LifecycleStatus | null
   onSelectSlide: (slideId: string) => void
   onMark: (slideId: string, mark: ReviewMark) => void
   onApply: () => void
@@ -17,6 +22,7 @@ type Props = {
   onApproveDeck: () => void
   onStartConversion: () => void
   onRetryConversion: () => void
+  onLifecycleAction: (action: LifecycleAction, retry?: boolean) => void
   onAiAction: (action: string) => void
 }
 
@@ -42,6 +48,15 @@ export function Inspector(props: Props) {
           canStart={state.canConvert}
           onStart={props.onStartConversion}
           onRetry={props.onRetryConversion}
+        />
+      )}
+
+      {['bento_authoring', 'content_review', 'bento_finalization', 'complete'].includes(state.stage) && (
+        <BentoLifecyclePanel
+          state={state}
+          status={props.lifecycle}
+          busy={props.busy}
+          onAction={props.onLifecycleAction}
         />
       )}
 

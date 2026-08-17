@@ -11,6 +11,8 @@ CLASS_GROUPS = {
     "tests.app.test_app_backend.ApplicationApiTests": "unit",
     "tests.app.test_app_backend.HtmlReviewServiceTests": "unit",
     "tests.app.test_app_backend.WorkflowServiceViewTests": "unit",
+    "tests.app.test_bento_lifecycle_service.BentoLifecycleServiceTests": "unit",
+    "tests.app.test_bento_lifecycle_service.BentoLifecycleApiTests": "unit",
     "tests.app.test_conversion_service.ConversionServiceTests": "unit",
     "tests.app.test_conversion_service.ConversionApiTests": "unit",
     "tests.test_bentoslide_app_node_resolver.BentoSlideAppNodeResolverTests": "windows",

@@ -91,10 +91,10 @@ def _write_conversion_fixture(root: Path) -> None:
     )
 
 
-def prepare_finalization_fixture(
+def prepare_authoring_fixture(
     root: str | Path, *, bento_port: int | None = None, confirm_disposable: bool = False,
 ) -> dict:
-    """Create a disposable fixture by traversing the real workflow gates."""
+    """Create a disposable bento-authoring fixture through the real workflow gates."""
 
     if not confirm_disposable:
         raise ValueError("Refusing to overwrite fixture artifacts without disposable confirmation")
@@ -175,9 +175,6 @@ def prepare_finalization_fixture(
     _write_conversion_fixture(repository)
     command_mark_converted(repository, load_state(repository))
     command_begin_authoring(repository, load_state(repository))
-    command_begin_content_review(repository, load_state(repository))
-    command_approve_content(repository, load_state(repository))
-    command_begin_finalization(repository, load_state(repository))
 
     state = load_state(repository)
     if bento_port is not None:
@@ -186,6 +183,23 @@ def prepare_finalization_fixture(
 
         atomic_write_state(repository, state)
         state = load_state(repository)
+    validate_output_bundle(repository, state, require_final=False)
+    return state
+
+
+def prepare_finalization_fixture(
+    root: str | Path, *, bento_port: int | None = None, confirm_disposable: bool = False,
+) -> dict:
+    """Create a disposable finalization fixture by traversing the real workflow gates."""
+
+    repository = Path(root).resolve()
+    prepare_authoring_fixture(
+        repository, bento_port=bento_port, confirm_disposable=confirm_disposable,
+    )
+    command_begin_content_review(repository, load_state(repository))
+    command_approve_content(repository, load_state(repository))
+    command_begin_finalization(repository, load_state(repository))
+    state = load_state(repository)
     validate_output_bundle(repository, state, require_final=True)
     return state
 

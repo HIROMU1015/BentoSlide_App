@@ -4,6 +4,8 @@ import type {
   ConversionStatus,
   HtmlReview,
   HtmlView,
+  LifecycleAction,
+  LifecycleStatus,
   ProjectResponse,
   SlideItem,
 } from '../types'
@@ -46,6 +48,25 @@ export function getConversionStatus() {
 
 export function startConversion() {
   return request<ConversionStatus>('/api/convert', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true }),
+  })
+}
+
+export function getLifecycleStatus() {
+  return request<LifecycleStatus>('/api/bento/lifecycle/status')
+}
+
+const lifecycleEndpoints: Record<LifecycleAction, string> = {
+  'content-review': '/api/bento/content/review',
+  'content-approve': '/api/bento/content/approve',
+  'final-approve': '/api/bento/final/approve',
+  'final-reopen': '/api/bento/final/reopen',
+  'final-open': '/api/bento/final/open',
+}
+
+export function startLifecycleAction(action: LifecycleAction) {
+  return request<LifecycleStatus>(lifecycleEndpoints[action], {
     method: 'POST',
     body: JSON.stringify({ confirmed: true }),
   })

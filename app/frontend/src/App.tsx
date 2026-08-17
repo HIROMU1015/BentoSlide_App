@@ -3,8 +3,10 @@ import {
   applyHtmlChange,
   approveHtmlDeck,
   getConversionStatus,
+  getLifecycleStatus,
   loadAppData,
   startConversion,
+  startLifecycleAction,
 } from './api/client'
 import { Inspector } from './components/Inspector'
 import { MainCanvas } from './components/MainCanvas'
@@ -16,6 +18,8 @@ import type {
   ConversionStatus,
   HtmlReview,
   HtmlView,
+  LifecycleAction,
+  LifecycleStatus,
   ProjectResponse,
   ReviewMark,
   ReviewMarks,
@@ -39,6 +43,7 @@ export default function App() {
   const [review, setReview] = useState<HtmlReview | null>(null)
   const [bento, setBento] = useState<BentoIntegration | null>(null)
   const [conversion, setConversion] = useState<ConversionStatus | null>(null)
+  const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null)
   const [selectedSlide, setSelectedSlide] = useState<string | null>(null)
   const [selectedElement] = useState<string | null>(null)
   const [currentMode, setCurrentMode] = useState<AppState['mode'] | null>(null)
@@ -46,6 +51,7 @@ export default function App() {
   const [htmlView, setHtmlView] = useState<HtmlView>('current')
   const [marks, setMarks] = useState<ReviewMarks>({})
   const [busy, setBusy] = useState(false)
+  const [lifecycleRequestBusy, setLifecycleRequestBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -82,6 +88,14 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let active = true
+    void getLifecycleStatus()
+      .then((result) => { if (active) setLifecycle(result) })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)) })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
     if (conversion?.status !== 'running') return
     let active = true
     const poll = async () => {
@@ -106,6 +120,32 @@ export default function App() {
       window.clearInterval(timer)
     }
   }, [conversion?.status, refresh])
+
+  useEffect(() => {
+    if (lifecycle?.status !== 'running') return
+    let active = true
+    const poll = async () => {
+      try {
+        const result = await getLifecycleStatus()
+        if (!active) return
+        setLifecycle(result)
+        if (result.status === 'succeeded') {
+          setNotice(result.message)
+          await refresh()
+        } else if (result.status === 'failed') {
+          await refresh()
+        }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [lifecycle?.status, refresh])
 
   useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
@@ -161,6 +201,32 @@ export default function App() {
       .finally(() => setBusy(false))
   }
 
+  const handleLifecycleAction = (action: LifecycleAction, retry = false) => {
+    const prompts: Record<LifecycleAction, string> = {
+      'content-review': retry
+        ? '内容確認画面の準備を再試行しますか？'
+        : '現在の編集内容を検証し、内容確認へ進みますか？',
+      'content-approve': retry
+        ? '内容承認と最終調整の準備を再試行しますか？'
+        : '現在の内容を承認し、最終調整へ進みますか？',
+      'final-approve': retry
+        ? '最終承認と完成処理を再試行しますか？'
+        : '現在の最終版を承認して完成させますか？',
+      'final-reopen': retry
+        ? '最終調整の再開をもう一度試しますか？'
+        : '最終承認を解除して最終調整を再開しますか？',
+      'final-open': '完成版をこのPCで開きますか？',
+    }
+    if (!window.confirm(prompts[action])) return
+    setLifecycleRequestBusy(true)
+    setError(null)
+    setNotice(null)
+    void startLifecycleAction(action)
+      .then(setLifecycle)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .finally(() => setLifecycleRequestBusy(false))
+  }
+
   const handleMark = (slideId: string, mark: ReviewMark) => {
     setMarks((current) => ({ ...current, [slideId]: mark }))
   }
@@ -168,6 +234,9 @@ export default function App() {
   const handleAiAction = (action: string) => {
     setNotice(`${action}: AI integration is not enabled in this prototype.`)
   }
+
+  const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running'
+  const processing = busy || lifecycleTransitioning || conversion?.status === 'running'
 
   if (!project || !state) {
     return (
@@ -188,7 +257,7 @@ export default function App() {
         </div>
         <div className="header-status">
           <span className={`mode-pill mode-${state.mode}`}>{modeLabels[state.mode]}</span>
-          <span className="save-state"><i />{busy ? '処理中' : '最新の状態'}</span>
+          <span className="save-state"><i />{processing ? '処理中' : '最新の状態'}</span>
         </div>
       </header>
 
@@ -201,6 +270,7 @@ export default function App() {
           selectedSlide={selectedSlide}
           onViewChange={setHtmlView}
           bento={bento}
+          transitioning={lifecycleTransitioning}
         />
         <Inspector
           state={state}
@@ -208,8 +278,9 @@ export default function App() {
           selectedElement={selectedElement}
           review={review}
           marks={marks}
-          busy={busy}
+          busy={processing}
           conversion={conversion}
+          lifecycle={lifecycle}
           onSelectSlide={setSelectedSlide}
           onMark={handleMark}
           onApply={handleApply}
@@ -217,6 +288,7 @@ export default function App() {
           onApproveDeck={handleApproveDeck}
           onStartConversion={() => handleConversion(false)}
           onRetryConversion={() => handleConversion(true)}
+          onLifecycleAction={handleLifecycleAction}
           onAiAction={handleAiAction}
         />
       </div>
@@ -224,7 +296,7 @@ export default function App() {
       <footer className="workflow-bar">
         <div><span className="workflow-dot" />{state.statusLabel}</div>
         <p>{state.nextActionLabel}</p>
-        <button type="button" onClick={() => void refresh()} disabled={busy}>状態を更新</button>
+        <button type="button" onClick={() => void refresh()} disabled={processing}>状態を更新</button>
       </footer>
 
       {(notice || error) && (

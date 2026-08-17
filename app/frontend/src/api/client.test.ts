@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getConversionStatus, loadAppData, startConversion } from './client'
+import {
+  getConversionStatus, getLifecycleStatus, loadAppData, startConversion, startLifecycleAction,
+} from './client'
 import type { AppState, HtmlReview } from '../types'
 
 const state: AppState = {
@@ -62,6 +64,26 @@ describe('conversion API client', () => {
       body: JSON.stringify({ confirmed: true }),
     }))
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/convert/status', expect.anything())
+  })
+})
+
+describe('Bento lifecycle API client', () => {
+  it('posts explicit confirmation to fixed action endpoints and reads status', async () => {
+    const payload = {
+      status: 'running', action: 'final-reopen', phase: 'reopening-final', stage: 'complete',
+      completedSteps: 0, totalSteps: 2, message: '再開中', error: null, retryable: false,
+      availableActions: [],
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => payload }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startLifecycleAction('final-reopen')
+    await getLifecycleStatus()
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/bento/final/reopen', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ confirmed: true }),
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/bento/lifecycle/status', expect.anything())
   })
 })
 

@@ -13,6 +13,14 @@ ConversionState = Literal["idle", "running", "succeeded", "failed"]
 ConversionPhase = Literal[
     "validating", "building", "validating-output", "starting-authoring", "complete",
 ]
+LifecycleAction = Literal[
+    "content-review", "content-approve", "final-approve", "final-reopen", "final-open",
+]
+LifecyclePhase = Literal[
+    "stopping-editor", "validating-content", "approving-content", "initializing-final",
+    "starting-editor", "approving-final", "completing", "reopening-final", "opening-final",
+    "complete",
+]
 
 
 class ProjectInfo(BaseModel):
@@ -103,6 +111,25 @@ class ConversionStatusResponse(BaseModel):
     message: str
     error: str | None = None
     retryable: bool = False
+
+
+class ConfirmedLifecycleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+
+
+class LifecycleStatusResponse(BaseModel):
+    status: ConversionState
+    action: LifecycleAction | None = None
+    phase: LifecyclePhase | None = None
+    stage: str
+    completedSteps: int = Field(ge=0, le=4)
+    totalSteps: int = Field(ge=1, le=4)
+    message: str
+    error: str | None = None
+    retryable: bool = False
+    availableActions: list[LifecycleAction] = Field(default_factory=list)
 
 
 class ActionResponse(BaseModel):
