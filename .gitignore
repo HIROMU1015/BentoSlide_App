@@ -19,8 +19,16 @@ output/.bento-cache/
 output/.bento-transactions/
 output/html-change-proposals/
 output/html-change-reviews/
+output/bentoslide-app.pid
+output/bentoslide-app-session.json
+output/bentoslide-app-launcher.lock
+output/bentoslide-app*.log
+output/app-tools/
 **/.bento-html-change-*.candidate.html
 **/.bento-html-change-*.candidate.registry.json
+app/frontend/node_modules/
+app/frontend/dist/
+app/frontend/*.tsbuildinfo
 sources/private/*
 !sources/private/.gitkeep
 images/user/*

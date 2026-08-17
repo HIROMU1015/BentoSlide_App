@@ -1,0 +1,61 @@
+export type UiMode =
+  | 'storyboard'
+  | 'html-design'
+  | 'converting'
+  | 'bento-edit'
+  | 'final-edit'
+  | 'complete'
+  | 'blocked'
+
+export type ProjectResponse = {
+  project: { title: string; kind: string }
+}
+
+export type AppState = {
+  mode: UiMode
+  stage: string
+  statusLabel: string
+  nextActionLabel: string
+  canConvert: boolean
+  canEditBento: boolean
+  hasCandidate: boolean
+  isBlocked: boolean
+  bentoEditorUrl: string | null
+}
+
+export type SlideItem = {
+  id: string
+  title: string
+  number: number
+  sectionTitle: string | null
+}
+
+export type ReviewSlide = {
+  id: string
+  title: string
+  number: number | null
+  impact: 'requested' | 'related' | 'changed' | 'added' | 'removed' | 'review'
+}
+
+export type HtmlProposal = {
+  status: 'proposed' | 'approved' | 'applied'
+  scope: 'local' | 'related' | 'structural-global'
+  summary: string
+  impactSummary: string
+  affectedSlides: ReviewSlide[]
+  postApplyReviewStatus: 'pending' | 'checked' | null
+}
+
+export type HtmlReview = {
+  currentHtmlUrl: string
+  candidateHtmlUrl: string | null
+  fullPreviewUrl: string | null
+  proposal: HtmlProposal | null
+  actionToken: string
+  canApply: boolean
+  canApproveDeck: boolean
+}
+
+export type ReviewMark = 'pending' | 'reviewed' | 'needs-work'
+export type ReviewMarks = Record<string, ReviewMark>
+export type HtmlView = 'current' | 'candidate'

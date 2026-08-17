@@ -8,6 +8,9 @@ VALID_GROUPS = ("unit", "browser", "determinism", "windows")
 # Every unittest.TestCase class must appear exactly once. A small number of
 # mixed classes use TEST_GROUP_OVERRIDES for individual browser-dependent tests.
 CLASS_GROUPS = {
+    "tests.app.test_app_backend.ApplicationApiTests": "unit",
+    "tests.app.test_app_backend.HtmlReviewServiceTests": "unit",
+    "tests.app.test_app_backend.WorkflowServiceViewTests": "unit",
     "tests.test_apply_bento_final_edits.FastFinalEditTests": "unit",
     "tests.test_artifact_transaction.ArtifactTransactionTests": "unit",
     "tests.test_authoring_storage.AuthoringArtifactStorageTests": "unit",
