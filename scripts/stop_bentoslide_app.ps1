@@ -38,7 +38,7 @@ try {
     $expected = [System.DateTimeOffset]::Parse([string]$session.processStartTimeUtc).UtcDateTime
     $actual = [System.DateTimeOffset]::Parse([string]$snapshot.StartTimeUtc).UtcDateTime
     if ([Math]::Abs(($expected - $actual).TotalMilliseconds) -gt 100) { throw 'App process start time does not match; no process was stopped.' }
-    $health = Invoke-RestMethod -Uri ([string]$session.url + 'api/health') -TimeoutSec 2
+    $health = Invoke-BentoUtf8JsonRequest -Uri ([string]$session.url + 'api/health') -TimeoutSeconds 2
     if ([string]$health.format -ne 'bento/application-api-health/v1' -or -not [string]::Equals([string]$health.repository, $repository, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'App health identity does not match; no process was stopped.' }
     Stop-Process -Id $recordedPid -Force -ErrorAction Stop
     $deadline = [System.DateTime]::UtcNow.AddSeconds($ShutdownTimeoutSeconds)

@@ -29,7 +29,7 @@ $url = "http://${hostAddress}:$Port/"
 
 function Get-BentoSlideAppHealth {
     try {
-        $health = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/health" -f $Port) -TimeoutSec 2
+        $health = Invoke-BentoUtf8JsonRequest -Uri ("http://127.0.0.1:{0}/api/health" -f $Port) -TimeoutSeconds 2
         if ([string]$health.format -ne 'bento/application-api-health/v1' -or
             -not [string]::Equals([string]$health.repository, $repository, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
         return $health

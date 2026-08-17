@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -14,6 +16,55 @@ WINDOWS = os.name == "nt"
 
 @unittest.skipUnless(WINDOWS, "Windows-only Node resolver tests")
 class BentoSlideAppNodeResolverTests(unittest.TestCase):
+    def test_common_launcher_decodes_json_body_as_utf8(self) -> None:
+        expected_repository = r"C:\日本語 空白\Bento 論文"
+        payload = json.dumps(
+            {
+                "format": "bento/application-api-health/v1",
+                "repository": expected_repository,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                del args
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            common = ROOT / "scripts" / "bento_editor_launcher.common.ps1"
+            with tempfile.TemporaryDirectory() as temporary:
+                result_path = Path(temporary) / "repository.txt"
+                command = (
+                    f". '{common}'; "
+                    f"$result = Invoke-BentoUtf8JsonRequest -Uri 'http://127.0.0.1:{server.server_port}/health'; "
+                    f"[System.IO.File]::WriteAllText('{result_path}', [string]$result.repository, "
+                    "(New-Object System.Text.UTF8Encoding($false)))"
+                )
+                completed = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(result_path.read_text(encoding="utf-8"), expected_repository)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_supported_versions_match_frontend_engine_contract(self) -> None:
         resolver = ROOT / "scripts" / "resolve_bentoslide_app_node.ps1"
         versions = [

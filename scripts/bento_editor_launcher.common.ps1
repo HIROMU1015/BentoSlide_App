@@ -29,6 +29,32 @@ function Get-BentoDisplayPath {
     return [System.IO.Path]::GetFileName($Value)
 }
 
+function Invoke-BentoUtf8JsonRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 2
+    )
+
+    $response = Invoke-WebRequest -Method Get -Uri $Uri -TimeoutSec $TimeoutSeconds -UseBasicParsing
+    $responseStream = $response.RawContentStream
+    if ($null -eq $responseStream) {
+        throw 'The HTTP response did not include a readable body.'
+    }
+    if ($responseStream.CanSeek) {
+        $responseStream.Position = 0
+    }
+    $bodyStream = New-Object System.IO.MemoryStream
+    try {
+        $responseStream.CopyTo($bodyStream)
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $body = $strictUtf8.GetString($bodyStream.ToArray())
+    }
+    finally {
+        $bodyStream.Dispose()
+    }
+    return $body | ConvertFrom-Json
+}
+
 function Get-BentoEditorStatus {
     param(
         [Parameter(Mandatory = $true)][string]$HostAddress,
@@ -37,7 +63,7 @@ function Get-BentoEditorStatus {
     )
 
     try {
-        $payload = Invoke-RestMethod -Method Get -Uri ("http://{0}:{1}/api/status" -f $HostAddress, $Port) -TimeoutSec $TimeoutSeconds
+        $payload = Invoke-BentoUtf8JsonRequest -Uri ("http://{0}:{1}/api/status" -f $HostAddress, $Port) -TimeoutSeconds $TimeoutSeconds
         $properties = @($payload.PSObject.Properties.Name)
         foreach ($required in @('target', 'revision', 'validation', 'runtimeFingerprint')) {
             if ($properties -notcontains $required) {
