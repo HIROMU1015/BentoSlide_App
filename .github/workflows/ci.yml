@@ -286,6 +286,7 @@ jobs:
               $PSNativeCommandUseErrorActionPreference = $false
               $conflictOutput = (& .\start_bentoslide_app.cmd -Port $busyPort -NoBrowser -NoClipboard 2>&1 | Out-String)
               $conflictExitCode = $LASTEXITCODE
+              $global:LASTEXITCODE = 0
             }
             finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
             if ($conflictExitCode -eq 0) { throw "BentoSlide App accepted a conflicting port" }
