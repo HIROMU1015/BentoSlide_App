@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from app.backend.main import create_app
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService, ui_mode_for_stage, verified_local_session_url
-from scripts.deck_workflow import WorkflowError
+from scripts.deck_workflow import WorkflowError, load_state
 
 
 class ApplicationApiTests(unittest.TestCase):
@@ -25,6 +25,7 @@ class ApplicationApiTests(unittest.TestCase):
         slides = client.get("/api/slides")
 
         self.assertEqual(project.status_code, 200)
+        self.assertEqual(project.json()["project"]["title"], load_state(repository)["project"]["title"])
         self.assertEqual(state.status_code, 200)
         self.assertEqual(slides.status_code, 200)
         self.assertIn(state.json()["mode"], {"storyboard", "html-design", "converting", "bento-edit", "final-edit", "complete", "blocked"})

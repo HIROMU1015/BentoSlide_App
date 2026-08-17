@@ -9,6 +9,10 @@ UiMode = Literal[
     "storyboard", "html-design", "converting", "bento-edit", "final-edit", "complete", "blocked",
 ]
 ReviewMark = Literal["pending", "reviewed", "needs-work"]
+ConversionState = Literal["idle", "running", "succeeded", "failed"]
+ConversionPhase = Literal[
+    "validating", "building", "validating-output", "starting-authoring", "complete",
+]
 
 
 class ProjectInfo(BaseModel):
@@ -83,6 +87,22 @@ class ApproveHtmlDeckRequest(BaseModel):
 
     actionToken: str = Field(min_length=20, max_length=256)
     confirmed: Literal[True]
+
+
+class StartConversionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+
+
+class ConversionStatusResponse(BaseModel):
+    status: ConversionState
+    phase: ConversionPhase | None = None
+    completedSteps: int = Field(ge=0, le=4)
+    totalSteps: Literal[4] = 4
+    message: str
+    error: str | None = None
+    retryable: bool = False
 
 
 class ActionResponse(BaseModel):

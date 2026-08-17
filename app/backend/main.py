@@ -14,22 +14,30 @@ from scripts.deck_workflow import WorkflowError, recover_repository_transactions
 
 from app.backend.api.routes import create_api_router
 from app.backend.services.bento_service import BentoService
+from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService
 
 
-def create_app(repository: str | Path | None = None, *, frontend_dist: str | Path | None = None) -> FastAPI:
+def create_app(
+    repository: str | Path | None = None,
+    *,
+    frontend_dist: str | Path | None = None,
+    conversion_service: ConversionService | None = None,
+) -> FastAPI:
     root = repository_root(repository or Path(__file__).resolve().parents[2])
     recover_repository_transactions(root)
     workflow = WorkflowService(root)
     html_review = HtmlReviewService(root, workflow)
     bento = BentoService(workflow)
+    conversion = conversion_service or ConversionService(root)
 
     application = FastAPI(title="BentoSlide Application API", version="0.1.0")
     application.state.repository = root
     application.state.workflow_service = workflow
     application.state.html_review_service = html_review
     application.state.bento_service = bento
+    application.state.conversion_service = conversion
 
     @application.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
@@ -48,6 +56,7 @@ def create_app(repository: str | Path | None = None, *, frontend_dist: str | Pat
         workflow=workflow,
         html_review=html_review,
         bento=bento,
+        conversion=conversion,
     ))
 
     dist = Path(frontend_dist).resolve() if frontend_dist else root / "app/frontend/dist"

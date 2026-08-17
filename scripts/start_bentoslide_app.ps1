@@ -100,7 +100,7 @@ try {
         if ($npmExitCode -ne 0 -or -not (Test-Path -LiteralPath $distIndex -PathType Leaf)) { throw 'Frontend build failed.' }
     }
 
-    $routeJson = & $python.Executable -m scripts.deck_workflow --root $repository route --json 2>&1
+    $routeJson = & $python.Executable -X utf8 -m scripts.deck_workflow --root $repository route --json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Cannot resolve the current BentoSlide workspace: $($routeJson -join ' ')" }
     $workspaceRoute = ($routeJson -join "`n" | ConvertFrom-Json).route
     if ($workspaceRoute -in @('authoring-editor', 'final-editor')) {

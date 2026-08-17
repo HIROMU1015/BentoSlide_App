@@ -23,6 +23,29 @@ export type AppState = {
   bentoEditorUrl: string | null
 }
 
+export type BentoIntegration = {
+  available: boolean
+  editorUrl: string | null
+  message: string
+}
+
+export type ConversionPhase =
+  | 'validating'
+  | 'building'
+  | 'validating-output'
+  | 'starting-authoring'
+  | 'complete'
+
+export type ConversionStatus = {
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  phase: ConversionPhase | null
+  completedSteps: number
+  totalSteps: 4
+  message: string
+  error: string | null
+  retryable: boolean
+}
+
 export type SlideItem = {
   id: string
   title: string

@@ -40,6 +40,8 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 - `GET /api/html/review`: 人が読むsummary、impact、affected slideとopaque action tokenだけを返します。
 - `POST /api/html/review/apply`: 全affected slideの確認を検証してから、既存approve/apply/browser-check関数を順に呼びます。
 - `POST /api/html/review/approve-deck`: 既存whole-deck approvalを呼びます。
+- `POST /api/convert`: `{ "confirmed": true }`を受け、承認済みHTMLの変換を1件だけバックグラウンドで開始します。
+- `GET /api/convert/status`: 実際の変換段階、完了ステップ、失敗理由、再試行可否を返します。
 - `GET /api/bento`: 現在stageで既存Bento Work editorを利用できるか返します。
 
 Frontendへproposal digestやrevisionは返しません。action tokenはprocess-localかつ現在のproposal状態へ固定され、再起動や状態変化で無効になります。

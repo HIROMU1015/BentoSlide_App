@@ -1,4 +1,12 @@
-import type { AppState, HtmlReview, HtmlView, ProjectResponse, SlideItem } from '../types'
+import type {
+  AppState,
+  BentoIntegration,
+  ConversionStatus,
+  HtmlReview,
+  HtmlView,
+  ProjectResponse,
+  SlideItem,
+} from '../types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -19,15 +27,28 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
   slides: SlideItem[]
   review: HtmlReview | null
   slideView: HtmlView
+  bento: BentoIntegration
 }> {
-  const [project, state] = await Promise.all([
+  const [project, state, bento] = await Promise.all([
     request<ProjectResponse>('/api/project'),
     request<AppState>('/api/state'),
+    request<BentoIntegration>('/api/bento'),
   ])
   const review = state.mode === 'html-design' ? await request<HtmlReview>('/api/html/review') : null
   const slideView = requestedView === 'candidate' && review?.candidateHtmlUrl ? 'candidate' : 'current'
   const slidesResponse = await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)
-  return { project, state, slides: slidesResponse.slides, review, slideView }
+  return { project, state, slides: slidesResponse.slides, review, slideView, bento }
+}
+
+export function getConversionStatus() {
+  return request<ConversionStatus>('/api/convert/status')
+}
+
+export function startConversion() {
+  return request<ConversionStatus>('/api/convert', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true }),
+  })
 }
 
 export function applyHtmlChange(review: HtmlReview, reviewedSlideIds: string[]) {

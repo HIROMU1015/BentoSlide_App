@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadAppData } from './client'
+import { getConversionStatus, loadAppData, startConversion } from './client'
 import type { AppState, HtmlReview } from '../types'
 
 const state: AppState = {
@@ -30,6 +30,8 @@ function installFetch(candidateHtmlUrl: string | null) {
       ? { project: { title: 'Fixture', kind: 'fixture' } }
       : url === '/api/state'
         ? state
+        : url === '/api/bento'
+          ? { available: false, editorUrl: null, message: '準備中' }
         : url === '/api/html/review'
           ? review
           : { slides: [{ id: url.endsWith('candidate') ? 'candidate-slide' : 'current-slide', title: 'Slide', number: 1, sectionTitle: null }] }
@@ -41,6 +43,26 @@ function installFetch(candidateHtmlUrl: string | null) {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('conversion API client', () => {
+  it('posts explicit confirmation and reads status', async () => {
+    const payload = {
+      status: 'running', phase: 'validating', completedSteps: 0, totalSteps: 4,
+      message: '確認中', error: null, retryable: false,
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => payload }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startConversion()
+    await getConversionStatus()
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/convert', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true }),
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/convert/status', expect.anything())
+  })
 })
 
 describe('loadAppData', () => {

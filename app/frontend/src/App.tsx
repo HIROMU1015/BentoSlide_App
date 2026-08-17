@@ -1,10 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { applyHtmlChange, approveHtmlDeck, loadAppData } from './api/client'
+import {
+  applyHtmlChange,
+  approveHtmlDeck,
+  getConversionStatus,
+  loadAppData,
+  startConversion,
+} from './api/client'
 import { Inspector } from './components/Inspector'
 import { MainCanvas } from './components/MainCanvas'
 import { SlideNavigator } from './components/SlideNavigator'
 import { initialReviewMarks, reviewedSlideIds } from './state/reviewState'
-import type { AppState, HtmlReview, HtmlView, ProjectResponse, ReviewMark, ReviewMarks, SlideItem } from './types'
+import type {
+  AppState,
+  BentoIntegration,
+  ConversionStatus,
+  HtmlReview,
+  HtmlView,
+  ProjectResponse,
+  ReviewMark,
+  ReviewMarks,
+  SlideItem,
+} from './types'
 
 const modeLabels: Record<string, string> = {
   storyboard: 'Storyboard',
@@ -21,6 +37,8 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [slides, setSlides] = useState<SlideItem[]>([])
   const [review, setReview] = useState<HtmlReview | null>(null)
+  const [bento, setBento] = useState<BentoIntegration | null>(null)
+  const [conversion, setConversion] = useState<ConversionStatus | null>(null)
   const [selectedSlide, setSelectedSlide] = useState<string | null>(null)
   const [selectedElement] = useState<string | null>(null)
   const [currentMode, setCurrentMode] = useState<AppState['mode'] | null>(null)
@@ -38,6 +56,7 @@ export default function App() {
       setState(data.state)
       setSlides(data.slides)
       setReview(data.review)
+      setBento(data.bento)
       setCurrentMode(data.state.mode)
       setCurrentProposal(data.review?.proposal ?? null)
       setError(null)
@@ -53,6 +72,40 @@ export default function App() {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  useEffect(() => {
+    let active = true
+    void getConversionStatus()
+      .then((result) => { if (active) setConversion(result) })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)) })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (conversion?.status !== 'running') return
+    let active = true
+    const poll = async () => {
+      try {
+        const result = await getConversionStatus()
+        if (!active) return
+        setConversion(result)
+        if (result.status === 'succeeded') {
+          setNotice('BentoSlideへの変換が完了しました。')
+          await refresh()
+        } else if (result.status === 'failed') {
+          await refresh()
+        }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [conversion?.status, refresh])
 
   useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
@@ -94,6 +147,20 @@ export default function App() {
     void runAction(() => approveHtmlDeck(review), 'HTML全体を確定しました。')
   }
 
+  const handleConversion = (retry: boolean) => {
+    const prompt = retry
+      ? 'BentoSlideへの変換を再試行しますか？'
+      : '承認済みHTMLをBentoSlideへ変換しますか？'
+    if (!window.confirm(prompt)) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    void startConversion()
+      .then(setConversion)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .finally(() => setBusy(false))
+  }
+
   const handleMark = (slideId: string, mark: ReviewMark) => {
     setMarks((current) => ({ ...current, [slideId]: mark }))
   }
@@ -133,6 +200,7 @@ export default function App() {
           htmlView={htmlView}
           selectedSlide={selectedSlide}
           onViewChange={setHtmlView}
+          bento={bento}
         />
         <Inspector
           state={state}
@@ -141,11 +209,14 @@ export default function App() {
           review={review}
           marks={marks}
           busy={busy}
+          conversion={conversion}
           onSelectSlide={setSelectedSlide}
           onMark={handleMark}
           onApply={handleApply}
           onRetryCheck={handleRetryCheck}
           onApproveDeck={handleApproveDeck}
+          onStartConversion={() => handleConversion(false)}
+          onRetryConversion={() => handleConversion(true)}
           onAiAction={handleAiAction}
         />
       </div>

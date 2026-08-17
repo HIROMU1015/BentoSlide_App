@@ -305,10 +305,13 @@ jobs:
           BENTO_EDITOR_NO_PAUSE: "1"
         run: |
           $env:BENTO_PYTHON = (Get-Command python.exe).Source
+          $sourceRoot = $PWD
           $archive = Join-Path $env:RUNNER_TEMP "bento-launcher.zip"
           $copy = Join-Path $env:RUNNER_TEMP "Bento Slide 論文スライド"
           git archive --format=zip --output=$archive HEAD
           Expand-Archive -LiteralPath $archive -DestinationPath $copy
+          Copy-Item -LiteralPath (Join-Path $sourceRoot "app/frontend/dist") `
+            -Destination (Join-Path $copy "app/frontend/dist") -Recurse
           Set-Location $copy
           $wholeDeckState = Join-Path $env:RUNNER_TEMP "whole-deck-html-review.yaml"
           Copy-Item deck.yaml $wholeDeckState
@@ -333,6 +336,44 @@ jobs:
             }
             return $process.ExitCode
           }
+          $appPortProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $appPortProbe.Start()
+          $appPort = ([System.Net.IPEndPoint]$appPortProbe.LocalEndpoint).Port
+          $appPortProbe.Stop()
+          $appArguments = "-Port $appPort -NoBrowser -NoClipboard"
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_bentoslide_app.cmd") $appArguments
+          if ($exitCode -ne 0) { throw "Japanese-path start_bentoslide_app.cmd failed: $exitCode" }
+          $appSession = Get-Content output/bentoslide-app-session.json -Raw -Encoding utf8 | ConvertFrom-Json
+          $appHealth = Invoke-RestMethod -Uri ($appSession.url + "api/health")
+          $appProjectJson = (& python -X utf8 -c `
+            "import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode('utf-8'))" `
+            ($appSession.url + "api/project"))
+          $appProject = ($appProjectJson -join "`n") | ConvertFrom-Json
+          if ($appHealth.status -ne "ok" -or $appProject.project.title -ne "BentoSlide0を実際に使う") {
+            throw "Japanese project title was not preserved by the BentoSlide App launcher"
+          }
+          $firstAppPid = $appSession.pid
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_bentoslide_app.cmd") $appArguments
+          if ($exitCode -ne 0) { throw "Japanese-path duplicate app start failed: $exitCode" }
+          $duplicateApp = Get-Content output/bentoslide-app-session.json -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($duplicateApp.pid -ne $firstAppPid) { throw "Japanese-path duplicate app process was started" }
+          $exitCode = Invoke-CmdLauncher (Join-Path $copy "stop_bentoslide_app.cmd")
+          if ($exitCode -ne 0) { throw "Japanese-path stop_bentoslide_app.cmd failed: $exitCode" }
+          if ((Get-Process -Id $firstAppPid -ErrorAction SilentlyContinue) -or
+              (Test-Path output/bentoslide-app.pid) -or (Test-Path output/bentoslide-app-session.json)) {
+            throw "Japanese-path App process or session files remain"
+          }
+          $conflictListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $conflictListener.Start()
+          try {
+            $busyAppPort = ([System.Net.IPEndPoint]$conflictListener.LocalEndpoint).Port
+            $conflictExit = Invoke-CmdLauncher (Join-Path $copy "start_bentoslide_app.cmd") "-Port $busyAppPort -NoBrowser -NoClipboard"
+            if ($conflictExit -eq 0) { throw "Japanese-path App accepted a conflicting port" }
+            if ((Test-Path output/bentoslide-app.pid) -or (Test-Path output/bentoslide-app-session.json)) {
+              throw "Japanese-path port conflict left App session files"
+            }
+          }
+          finally { $conflictListener.Stop() }
           $exitCode = Invoke-CmdLauncher (Join-Path $copy "start_deck_workspace.cmd") "-NoClipboard"
           if ($exitCode -ne 0) { throw "initialized start_deck_workspace.cmd failed: $exitCode" }
           if ((Test-Path output/html-preview-session.json) -or (Test-Path output/work-editor-session.json)) {
@@ -419,6 +460,10 @@ jobs:
         shell: pwsh
         run: |
           $copy = Join-Path $env:RUNNER_TEMP "Bento Slide 論文スライド"
+          $appStop = Join-Path $copy "scripts/stop_bentoslide_app.ps1"
+          if ((Test-Path $appStop) -and (Test-Path (Join-Path $copy "output/bentoslide-app-session.json"))) {
+            & $appStop
+          }
           $previewStop = Join-Path $copy "scripts/stop_html_preview.ps1"
           if ((Test-Path $previewStop) -and (Test-Path (Join-Path $copy "output/html-preview-session.json"))) {
             & $previewStop

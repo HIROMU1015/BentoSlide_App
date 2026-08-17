@@ -12,18 +12,22 @@ from app.backend.models.view_models import (
     ApplyHtmlRequest,
     ApproveHtmlDeckRequest,
     BentoIntegrationResponse,
+    ConversionStatusResponse,
     HtmlReviewResponse,
     ProjectResponse,
     SlidesResponse,
     StateResponse,
+    StartConversionRequest,
 )
 from app.backend.services.bento_service import BentoService
+from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService
 
 
 def create_api_router(
     *, repository: Path, workflow: WorkflowService, html_review: HtmlReviewService, bento: BentoService,
+    conversion: ConversionService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -68,6 +72,14 @@ def create_api_router(
     @router.get("/bento", response_model=BentoIntegrationResponse)
     def bento_integration() -> BentoIntegrationResponse:
         return bento.integration()
+
+    @router.post("/convert", response_model=ConversionStatusResponse, status_code=HTTPStatus.ACCEPTED)
+    def start_conversion(_request: StartConversionRequest) -> ConversionStatusResponse:
+        return conversion.start()
+
+    @router.get("/convert/status", response_model=ConversionStatusResponse)
+    def conversion_status() -> ConversionStatusResponse:
+        return conversion.status()
 
     safe_headers = {
         "Cache-Control": "no-store",

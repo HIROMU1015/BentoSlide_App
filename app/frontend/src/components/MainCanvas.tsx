@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { AppState, HtmlReview, HtmlView } from '../types'
+import type { AppState, BentoIntegration, HtmlReview, HtmlView } from '../types'
 
 type Props = {
   state: AppState
@@ -7,9 +7,10 @@ type Props = {
   htmlView: HtmlView
   selectedSlide: string | null
   onViewChange: (view: HtmlView) => void
+  bento: BentoIntegration | null
 }
 
-function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Omit<Props, 'state'>) {
+function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Omit<Props, 'state' | 'bento'>) {
   const frame = useRef<HTMLIFrameElement>(null)
   const source = htmlView === 'candidate' ? review?.candidateHtmlUrl : review?.currentHtmlUrl
 
@@ -96,17 +97,18 @@ function EmptyCanvas({ title, detail }: { title: string; detail: string }) {
 }
 
 export function MainCanvas(props: Props) {
-  const { state } = props
+  const { state, bento } = props
   if (state.mode === 'html-design') return <HtmlCanvas {...props} />
-  if ((state.mode === 'bento-edit' || state.mode === 'final-edit') && state.bentoEditorUrl) {
+  const editorUrl = bento?.available ? bento.editorUrl : state.bentoEditorUrl
+  if ((state.mode === 'bento-edit' || state.mode === 'final-edit') && editorUrl) {
     return (
       <section className="main-canvas bento-canvas">
         <div className="canvas-toolbar">
           <span className="view-label bento">Bento編集</span>
-          <a className="text-link" href={state.bentoEditorUrl} target="_blank" rel="noreferrer">別画面で開く</a>
+          <a className="text-link" href={editorUrl} target="_blank" rel="noreferrer">別画面で開く</a>
         </div>
         <div className="frame-shell">
-          <iframe title="Bento編集画面" src={state.bentoEditorUrl} allow="clipboard-write" />
+          <iframe title="Bento編集画面" src={editorUrl} allow="clipboard-write" />
         </div>
       </section>
     )
@@ -114,7 +116,7 @@ export function MainCanvas(props: Props) {
   const messages: Record<string, [string, string]> = {
     storyboard: ['構成を準備しています', '資料と構成案が揃うと、ここで全体を確認できます。'],
     converting: ['BentoSlideへ変換します', '承認済みのHTMLを既存エンジンが安全に変換・検証します。'],
-    'bento-edit': ['Bento編集を準備しています', '変換結果の検証が終わると編集画面が利用できます。'],
+    'bento-edit': ['Bento編集を準備しています', bento?.message ?? '変換結果の検証が終わると編集画面が利用できます。'],
     complete: ['資料は完成しています', '完成版は既存のviewerから確認できます。'],
     blocked: ['処理を停止しています', state.nextActionLabel],
   }

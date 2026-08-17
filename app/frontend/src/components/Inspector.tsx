@@ -1,4 +1,5 @@
-import type { AppState, HtmlReview, ReviewMark, ReviewMarks, SlideItem } from '../types'
+import type { AppState, ConversionStatus, HtmlReview, ReviewMark, ReviewMarks, SlideItem } from '../types'
+import { ConversionPanel } from './ConversionPanel'
 import { HtmlReviewPanel } from './HtmlReviewPanel'
 
 type Props = {
@@ -8,11 +9,14 @@ type Props = {
   review: HtmlReview | null
   marks: ReviewMarks
   busy: boolean
+  conversion: ConversionStatus | null
   onSelectSlide: (slideId: string) => void
   onMark: (slideId: string, mark: ReviewMark) => void
   onApply: () => void
   onRetryCheck: () => void
   onApproveDeck: () => void
+  onStartConversion: () => void
+  onRetryConversion: () => void
   onAiAction: (action: string) => void
 }
 
@@ -29,6 +33,16 @@ export function Inspector(props: Props) {
 
       {state.mode === 'html-design' && review && (
         <HtmlReviewPanel {...props} review={review} selectedSlide={selected?.id ?? null} />
+      )}
+
+      {(state.canConvert || props.conversion?.status === 'running' || props.conversion?.status === 'failed') && (
+        <ConversionPanel
+          status={props.conversion}
+          busy={props.busy}
+          canStart={state.canConvert}
+          onStart={props.onStartConversion}
+          onRetry={props.onRetryConversion}
+        />
       )}
 
       <section className="inspector-section ai-actions">
