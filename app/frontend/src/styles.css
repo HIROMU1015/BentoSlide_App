@@ -106,8 +106,12 @@ button { color: inherit; }
 .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .action-grid button { padding: 8px 6px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 10px; cursor: pointer; }
 .action-grid button:hover:not(:disabled) { border-color: #93c5fd; background: #f8fbff; }
+.action-grid button.is-active { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 800; }
 .action-grid button:disabled { color: #aab3c0; background: #f8fafc; }
-.prototype-note { margin-top: 9px !important; color: #94a3b8 !important; font-size: 9px !important; }
+.ai-instruction { display: grid; gap: 5px; margin-top: 10px; color: #64748b; font-size: 10px; font-weight: 700; }
+.ai-instruction textarea { width: 100%; resize: vertical; min-height: 70px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; color: #334155; background: #fff; font-size: 10px; line-height: 1.45; }
+.ai-instruction textarea:focus { outline: 2px solid #bfdbfe; border-color: #60a5fa; }
+.ai-unavailable { margin-top: 9px !important; padding: 8px; border-radius: 7px; background: #f8fafc; color: #64748b !important; font-size: 9px !important; }
 .conversion-panel h3 { margin: 0 0 10px; font-size: 13px; }
 .conversion-progress { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; padding: 10px; border-radius: 8px; background: #eff6ff; }
 .conversion-progress strong { font-size: 10px; color: #1d4ed8; }

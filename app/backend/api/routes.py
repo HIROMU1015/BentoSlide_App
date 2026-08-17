@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 
 from app.backend.models.view_models import (
     ActionResponse,
+    AiProposalRequest,
+    AiStatusResponse,
     ApplyHtmlRequest,
     ApproveHtmlDeckRequest,
     BentoIntegrationResponse,
@@ -22,6 +24,7 @@ from app.backend.models.view_models import (
     StartConversionRequest,
 )
 from app.backend.services.bento_service import BentoService
+from app.backend.services.ai_proposal_service import AiProposalService
 from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
@@ -32,6 +35,7 @@ def create_api_router(
     *, repository: Path, workflow: WorkflowService, html_review: HtmlReviewService, bento: BentoService,
     conversion: ConversionService,
     lifecycle: BentoLifecycleService,
+    ai: AiProposalService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -88,6 +92,18 @@ def create_api_router(
     @router.get("/bento/lifecycle/status", response_model=LifecycleStatusResponse)
     def lifecycle_status() -> LifecycleStatusResponse:
         return lifecycle.status()
+
+    @router.get("/ai/status", response_model=AiStatusResponse)
+    def ai_status() -> AiStatusResponse:
+        return ai.status()
+
+    @router.post("/ai/proposals", response_model=AiStatusResponse, status_code=HTTPStatus.ACCEPTED)
+    def create_ai_proposal(request: AiProposalRequest) -> AiStatusResponse:
+        return ai.start(
+            slide_id=request.slideId,
+            action=request.action,
+            instruction=request.instruction,
+        )
 
     @router.post(
         "/bento/content/review", response_model=LifecycleStatusResponse,

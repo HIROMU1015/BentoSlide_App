@@ -114,3 +114,30 @@ export type HtmlReview = {
 export type ReviewMark = 'pending' | 'reviewed' | 'needs-work'
 export type ReviewMarks = Record<string, ReviewMark>
 export type HtmlView = 'current' | 'candidate'
+
+export type AiAction = 'shorten' | 'add-diagram' | 'improve-structure' | 'custom'
+export type AiJobPhase =
+  | 'preparing'
+  | 'running-agent'
+  | 'validating-candidate'
+  | 'registering-proposal'
+  | 'succeeded'
+  | 'failed'
+
+export type AiStatus = {
+  available: boolean
+  reason: string | null
+  supportedActions: AiAction[]
+  allowedStage: boolean
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  phase: AiJobPhase | null
+  message: string
+  error: string | null
+  retryable: boolean
+}
+
+export type AiProposalInput = {
+  slideId: string
+  action: AiAction
+  instruction: string
+}

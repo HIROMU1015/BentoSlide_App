@@ -21,6 +21,11 @@ LifecyclePhase = Literal[
     "starting-editor", "approving-final", "completing", "reopening-final", "opening-final",
     "complete",
 ]
+AiAction = Literal["shorten", "add-diagram", "improve-structure", "custom"]
+AiJobPhase = Literal[
+    "preparing", "running-agent", "validating-candidate", "registering-proposal",
+    "succeeded", "failed",
+]
 
 
 class ProjectInfo(BaseModel):
@@ -130,6 +135,27 @@ class LifecycleStatusResponse(BaseModel):
     error: str | None = None
     retryable: bool = False
     availableActions: list[LifecycleAction] = Field(default_factory=list)
+
+
+class AiProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+    slideId: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    action: AiAction
+    instruction: str = Field(default="", max_length=2000)
+
+
+class AiStatusResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    supportedActions: list[AiAction]
+    allowedStage: bool
+    status: ConversionState
+    phase: AiJobPhase | None = None
+    message: str
+    error: str | None = None
+    retryable: bool = False
 
 
 class ActionResponse(BaseModel):

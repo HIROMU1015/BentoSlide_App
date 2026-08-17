@@ -29,6 +29,7 @@ output/app-tools/
 app/frontend/node_modules/
 app/frontend/dist/
 app/frontend/*.tsbuildinfo
+.bento-ai/
 sources/private/*
 !sources/private/.gitkeep
 images/user/*

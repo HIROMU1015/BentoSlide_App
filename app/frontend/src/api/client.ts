@@ -1,5 +1,7 @@
 import type {
   AppState,
+  AiProposalInput,
+  AiStatus,
   BentoIntegration,
   ConversionStatus,
   HtmlReview,
@@ -69,6 +71,17 @@ export function startLifecycleAction(action: LifecycleAction) {
   return request<LifecycleStatus>(lifecycleEndpoints[action], {
     method: 'POST',
     body: JSON.stringify({ confirmed: true }),
+  })
+}
+
+export function getAiStatus() {
+  return request<AiStatus>('/api/ai/status')
+}
+
+export function startAiProposal(input: AiProposalInput) {
+  return request<AiStatus>('/api/ai/proposals', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, ...input }),
   })
 }
 

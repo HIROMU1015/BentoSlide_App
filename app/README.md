@@ -49,6 +49,8 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 - `POST /api/bento/final/approve`: finalization editorを停止し、現行revisionのみを承認して`complete`へ進めます。
 - `POST /api/bento/final/open`: 既存のstage-aware launcherで完成版を開きます。
 - `POST /api/bento/final/reopen`: 既存の再開処理で最終承認を無効化し、finalization editorを再開します。
+- `GET /api/ai/status`: Codex SDKの利用可否、利用できる操作、実処理段階、失敗理由、再試行可否だけを返します。
+- `POST /api/ai/proposals`: `{ "confirmed": true, "slideId": "...", "action": "shorten", "instruction": "..." }`を受け、確認用のwhole-deck候補を1件だけバックグラウンド生成します。
 
 5つのBento lifecycle POSTはすべて`{ "confirmed": true }`のみを受け付け、`202 Accepted`でバックグラウンド処理を開始します。既知のstage不一致、重複実行、検証できないeditor sessionは`409 Conflict`で拒否します。処理中はAppがstatusを定期取得し、実際の段階と完了数を表示します。
 
@@ -73,8 +75,37 @@ complete
 
 App内でバックグラウンド実行するBento lifecycle actionは、1リポジトリにつき同時に1件です。各workflowコマンドとWork editorのwriter lease/transaction/session identity検証は既存実装が保護します。App API自身は`deck.yaml`、Bento HTML/JSON、registry、final成果物を直接書き換えません。
 
+## AI Actions（任意）
+
+通常のAppとテストはCodex SDKなしでも起動できます。AI Actionsを利用するPCだけ、通常依存関係に加えて次をインストールしてください。
+
+```powershell
+python -m pip install -r requirements-ai.txt
+```
+
+公式`openai-codex` Python SDKは既存のローカルCodex認証を再利用します。Codexへ未サインインの場合は、先にCodexアプリ等でサインインしてからBentoSlide Appを再起動してください。モデルはローカルCodex設定を既定とし、運用上固定する場合だけBackend起動前に`BENTOSLIDE_AI_MODEL`を設定します。モデル名、認証情報、thread IDはFrontendへ返しません。
+
+AI Actionsを利用できるのは、`whole_deck`方式の`html_review`で、未解決の変更案がないときだけです。対象は選択中のスライドで、操作は次の4種類です。
+
+- `shorten`: 既存情報を増やさず短くする
+- `add-diagram`: bitmapや外部assetを増やさず、編集可能なHTML/CSS/SVG図を提案する
+- `improve-structure`: 対象と明示された関連スライドの構成を整える
+- `custom`: 入力した指示に沿って候補を作る（指示必須）
+
+各ジョブはgit管理外の`.bento-ai/runs/<job>/`へ隔離され、現在のHTML／registry、選択・操作情報、許可されたprimary source、必要な仕様だけをコピーします。SDKはその作業領域を`workspace_write`で使用し、ネットワークは無効です。出力は完全なcandidate HTML／registry／結果JSONとして検証されます。対象外スライド、既存ID、式、数値、asset、provenance、入力ファイルに不正な変更があれば、既存のproposal登録処理を呼ぶ前に失敗します。
+
+成功しても現在案、承認、変換は自動実行されません。Appは既存の「変更案」previewへ切り替えるだけです。人が影響スライドを確認し、「この変更案全体を反映」を明示的に実行したときだけ、既存approve → apply → browser check経路が動きます。
+
+### AI Actionsのトラブルシューティング
+
+- 「Codex SDKが見つかりません」: 上記`requirements-ai.txt`を、Backendが使用するPythonへインストールします。
+- 「Codexへサインイン」: ローカルCodexでサインイン後、Backendを再起動します。認証情報をApp画面へ入力する必要はありません。
+- 「現在の状態では利用できません」: HTML全体の確認画面へ戻り、既存の変更案を確認・反映または取り消します。
+- 候補検証の失敗: 対象や補足指示を狭くして再試行します。失敗した候補が現在案へ反映されることはありません。
+- Backend再起動: 実行中だったジョブは成功扱いにせず、再試行可能な失敗として表示します。
+
 ## 現在の制約
 
 - AppはWindowsの既存PowerShell launcherでWork editorを起動・停止します。Bento lifecycle操作のeditor連携はWindows専用です。
 - 保存自体は既存Work editorが担当します。React側にBento編集機能は再実装していません。
-- AI Actionsは引き続きplaceholderで、自動編集は行いません。
+- AI ActionsはoptionalなCodex SDK機能です。ネットワークなしの隔離領域で候補だけを生成し、画像生成、Bento直接編集、自動承認、自動反映、自動変換は行いません。

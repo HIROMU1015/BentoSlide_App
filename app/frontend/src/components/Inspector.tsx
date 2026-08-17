@@ -1,10 +1,11 @@
 import type {
-  AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
+  AiProposalInput, AiStatus, AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
   ReviewMark, ReviewMarks, SlideItem,
 } from '../types'
 import { BentoLifecyclePanel } from './BentoLifecyclePanel'
 import { ConversionPanel } from './ConversionPanel'
 import { HtmlReviewPanel } from './HtmlReviewPanel'
+import { AiActionsPanel } from './AiActionsPanel'
 
 type Props = {
   state: AppState
@@ -15,6 +16,7 @@ type Props = {
   busy: boolean
   conversion: ConversionStatus | null
   lifecycle: LifecycleStatus | null
+  ai: AiStatus | null
   onSelectSlide: (slideId: string) => void
   onMark: (slideId: string, mark: ReviewMark) => void
   onApply: () => void
@@ -23,11 +25,12 @@ type Props = {
   onStartConversion: () => void
   onRetryConversion: () => void
   onLifecycleAction: (action: LifecycleAction, retry?: boolean) => void
-  onAiAction: (action: string) => void
+  onStartAiProposal: (input: AiProposalInput) => void
+  onRetryAiProposal: (input: AiProposalInput) => void
 }
 
 export function Inspector(props: Props) {
-  const { state, selected, selectedElement, review, onAiAction } = props
+  const { state, selected, selectedElement, review } = props
   return (
     <aside className="inspector">
       <div className="panel-heading"><span>Inspector</span></div>
@@ -60,16 +63,14 @@ export function Inspector(props: Props) {
         />
       )}
 
-      <section className="inspector-section ai-actions">
-        <div className="section-kicker">AI Actions</div>
-        <h3>選択したスライドを変更</h3>
-        <div className="action-grid">
-          {['構成を改善', '図を追加', '短くする', '自由に変更'].map((action) => (
-            <button key={action} type="button" onClick={() => onAiAction(action)} disabled={!selected}>{action}</button>
-          ))}
-        </div>
-        <p className="prototype-note">AI連携は次のPhaseで有効になります。</p>
-      </section>
+      <AiActionsPanel
+        selected={selected}
+        status={props.ai}
+        disabled={props.busy || state.mode !== 'html-design'}
+        hasProposal={Boolean(review?.proposal && review.proposal.status !== 'applied')}
+        onStart={props.onStartAiProposal}
+        onRetry={props.onRetryAiProposal}
+      />
     </aside>
   )
 }

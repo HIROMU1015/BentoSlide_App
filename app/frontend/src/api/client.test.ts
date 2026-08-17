@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  getConversionStatus, getLifecycleStatus, loadAppData, startConversion, startLifecycleAction,
+  getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
+  startConversion, startLifecycleAction,
 } from './client'
 import type { AppState, HtmlReview } from '../types'
 
@@ -84,6 +85,26 @@ describe('Bento lifecycle API client', () => {
       method: 'POST', body: JSON.stringify({ confirmed: true }),
     }))
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/bento/lifecycle/status', expect.anything())
+  })
+})
+
+describe('AI proposal API client', () => {
+  it('posts only the explicit confirmation and bounded proposal fields', async () => {
+    const payload = {
+      available: true, reason: null, supportedActions: ['shorten'], allowedStage: true,
+      status: 'running', phase: 'preparing', message: '準備中', error: null, retryable: false,
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => payload }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startAiProposal({ slideId: 's1', action: 'shorten', instruction: '簡潔に' })
+    await getAiStatus()
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/ai/proposals', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true, slideId: 's1', action: 'shorten', instruction: '簡潔に' }),
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/ai/status', expect.anything())
   })
 })
 

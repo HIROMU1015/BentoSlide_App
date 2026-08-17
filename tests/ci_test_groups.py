@@ -11,6 +11,8 @@ CLASS_GROUPS = {
     "tests.app.test_app_backend.ApplicationApiTests": "unit",
     "tests.app.test_app_backend.HtmlReviewServiceTests": "unit",
     "tests.app.test_app_backend.WorkflowServiceViewTests": "unit",
+    "tests.app.test_ai_proposal_service.AiProposalServiceTests": "unit",
+    "tests.app.test_ai_proposal_service.AiProposalApiTests": "unit",
     "tests.app.test_bento_lifecycle_service.BentoLifecycleServiceTests": "unit",
     "tests.app.test_bento_lifecycle_service.BentoLifecycleApiTests": "unit",
     "tests.app.test_conversion_service.ConversionServiceTests": "unit",

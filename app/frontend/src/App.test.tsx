@@ -2,17 +2,30 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import {
-  getConversionStatus, getLifecycleStatus, loadAppData, startConversion, startLifecycleAction,
+  getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
+  startConversion, startLifecycleAction,
 } from './api/client'
-import type { AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus } from './types'
+import type { AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus } from './types'
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
 
 vi.mock('./api/client', () => ({
   applyHtmlChange: vi.fn(),
   approveHtmlDeck: vi.fn(),
   getConversionStatus: vi.fn(),
+  getAiStatus: vi.fn(),
   getLifecycleStatus: vi.fn(),
   loadAppData: vi.fn(),
   startConversion: vi.fn(),
+  startAiProposal: vi.fn(),
   startLifecycleAction: vi.fn(),
 }))
 
@@ -30,6 +43,13 @@ const idleLifecycle: LifecycleStatus = {
   status: 'idle', action: null, phase: null, stage: 'html_review',
   completedSteps: 0, totalSteps: 1, message: '待機中', error: null, retryable: false,
   availableActions: [],
+}
+
+const idleAi: AiStatus = {
+  available: true, reason: null,
+  supportedActions: ['shorten', 'add-diagram', 'improve-structure', 'custom'],
+  allowedStage: true, status: 'idle', phase: null,
+  message: '変更案を作成できます', error: null, retryable: false,
 }
 
 const appState: AppState = {
@@ -57,6 +77,7 @@ const review: HtmlReview = {
 beforeEach(() => {
   vi.mocked(getConversionStatus).mockResolvedValue(idleConversion)
   vi.mocked(getLifecycleStatus).mockResolvedValue(idleLifecycle)
+  vi.mocked(getAiStatus).mockResolvedValue(idleAi)
   vi.mocked(startConversion).mockResolvedValue({
     ...idleConversion,
     status: 'running',
@@ -66,6 +87,9 @@ beforeEach(() => {
   vi.mocked(startLifecycleAction).mockResolvedValue({
     ...idleLifecycle, status: 'running', action: 'content-review', phase: 'stopping-editor',
     stage: 'bento_authoring', totalSteps: 3, message: '編集画面を停止しています',
+  })
+  vi.mocked(startAiProposal).mockResolvedValue({
+    ...idleAi, status: 'running', phase: 'preparing', message: '準備中',
   })
   vi.mocked(loadAppData).mockImplementation(async (view: HtmlView = 'current') => ({
     project: { project: { title: 'Fixture', kind: 'fixture' } },
@@ -201,6 +225,50 @@ describe('App conversion workflow', () => {
     expect(await screen.findByTitle('Bento編集画面')).toHaveAttribute('src', 'http://127.0.0.1:8765/')
     expect(loadAppData).toHaveBeenCalledTimes(2)
   })
+
+  it('settles an immediate conversion success before showing refreshed state', async () => {
+    useReadyState()
+    const refreshed = deferred<Awaited<ReturnType<typeof loadAppData>>>()
+    const initial = await loadAppData('current')
+    vi.mocked(loadAppData).mockReset().mockResolvedValueOnce(initial).mockReturnValueOnce(refreshed.promise)
+    vi.mocked(startConversion).mockResolvedValue({
+      ...idleConversion, status: 'succeeded', phase: 'complete', completedSteps: 4,
+      message: '完了しました',
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'BentoSlideへ変換' }))
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+    expect(screen.getAllByText('処理中').length).toBeGreaterThan(0)
+
+    refreshed.resolve({
+      ...initial,
+      state: { ...readyState, mode: 'bento-edit', stage: 'bento_authoring', canConvert: false, canEditBento: true },
+      bento: { available: true, editorUrl: 'http://127.0.0.1:8765/', message: '編集できます' },
+    })
+    expect(await screen.findByTitle('Bento編集画面')).toHaveAttribute('src', 'http://127.0.0.1:8765/')
+  })
+
+  it('refreshes after an immediate conversion failure and enables retry only after settling', async () => {
+    useReadyState()
+    const refreshed = deferred<Awaited<ReturnType<typeof loadAppData>>>()
+    const initial = await loadAppData('current')
+    vi.mocked(loadAppData).mockReset().mockResolvedValueOnce(initial).mockReturnValueOnce(refreshed.promise)
+    vi.mocked(startConversion).mockResolvedValue({
+      ...idleConversion, status: 'failed', phase: 'building', completedSteps: 1,
+      message: '失敗しました', error: '候補を確認してください', retryable: true,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'BentoSlideへ変換' }))
+    const retry = await screen.findByRole('button', { name: '再試行' })
+    expect(retry).toBeDisabled()
+    refreshed.resolve(initial)
+    await waitFor(() => expect(retry).toBeEnabled())
+    expect(screen.getByRole('alert')).toHaveTextContent('候補を確認してください')
+  })
 })
 
 describe('App Bento lifecycle workflow', () => {
@@ -265,6 +333,74 @@ describe('App Bento lifecycle workflow', () => {
     expect(loadAppData).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps the old editor hidden while an immediate lifecycle success is refreshing', async () => {
+    const initial = appData(authoringState, 'http://127.0.0.1:8765/')
+    const refreshed = deferred<ReturnType<typeof appData>>()
+    vi.mocked(loadAppData).mockResolvedValueOnce(initial).mockReturnValueOnce(refreshed.promise)
+    vi.mocked(getLifecycleStatus).mockResolvedValue({
+      ...idleLifecycle, stage: 'bento_authoring', availableActions: ['content-review'],
+    })
+    vi.mocked(startLifecycleAction).mockResolvedValue({
+      ...idleLifecycle, status: 'succeeded', action: 'content-review', phase: 'complete',
+      stage: 'content_review', completedSteps: 3, totalSteps: 3, message: '内容確認を開始しました',
+      availableActions: ['content-approve'],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '内容確認へ進む' }))
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+    expect(screen.queryByTitle('Bento編集画面')).not.toBeInTheDocument()
+
+    refreshed.resolve(appData({ ...authoringState, stage: 'content_review' }, 'http://127.0.0.1:9876/'))
+    expect(await screen.findByTitle('Bento編集画面')).toHaveAttribute('src', 'http://127.0.0.1:9876/')
+  })
+
+  it('refreshes after an immediate lifecycle failure and shows retry', async () => {
+    const initial = appData(authoringState, 'http://127.0.0.1:8765/')
+    vi.mocked(loadAppData).mockResolvedValue(initial)
+    vi.mocked(getLifecycleStatus).mockResolvedValue({
+      ...idleLifecycle, stage: 'bento_authoring', availableActions: ['content-review'],
+    })
+    vi.mocked(startLifecycleAction).mockResolvedValue({
+      ...idleLifecycle, status: 'failed', action: 'content-review', phase: 'stopping-editor',
+      stage: 'bento_authoring', totalSteps: 3, message: '開始できませんでした',
+      error: '編集画面を停止できませんでした', retryable: true, availableActions: ['content-review'],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '内容確認へ進む' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('編集画面を停止できませんでした')
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: '再試行' })).toBeEnabled()
+  })
+
+  it('does not overlap lifecycle status polls while a previous request is pending', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(appData(authoringState, 'http://127.0.0.1:8765/'))
+    const pendingPoll = deferred<LifecycleStatus>()
+    vi.mocked(getLifecycleStatus)
+      .mockResolvedValueOnce({ ...idleLifecycle, stage: 'bento_authoring', availableActions: ['content-review'] })
+      .mockReturnValueOnce(pendingPoll.promise)
+    vi.mocked(startLifecycleAction).mockResolvedValue({
+      ...idleLifecycle, status: 'running', action: 'content-review', phase: 'stopping-editor',
+      stage: 'bento_authoring', totalSteps: 3, message: '停止中', availableActions: [],
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '内容確認へ進む' }))
+
+    await waitFor(() => expect(getLifecycleStatus).toHaveBeenCalledTimes(2), { timeout: 1000 })
+    await new Promise((resolve) => window.setTimeout(resolve, 400))
+    expect(getLifecycleStatus).toHaveBeenCalledTimes(2)
+    pendingPoll.resolve({
+      ...idleLifecycle, status: 'failed', action: 'content-review', phase: 'stopping-editor',
+      stage: 'bento_authoring', totalSteps: 3, message: '失敗', error: '失敗', retryable: true,
+      availableActions: ['content-review'],
+    })
+  })
+
   it('can reopen finalization from the completion screen', async () => {
     const completeState: AppState = {
       ...authoringState, mode: 'complete', stage: 'complete', canEditBento: false, bentoEditorUrl: null,
@@ -280,5 +416,52 @@ describe('App Bento lifecycle workflow', () => {
 
     await waitFor(() => expect(startLifecycleAction).toHaveBeenCalledWith('final-reopen'))
     expect(window.confirm).toHaveBeenCalledWith('最終承認を解除して最終調整を再開しますか？')
+  })
+})
+
+describe('App AI proposal workflow', () => {
+  it('confirms creation, refreshes the app, and switches to the review-only candidate', async () => {
+    const initialData = {
+      project: { project: { title: 'AI Fixture', kind: 'fixture' } },
+      state: { ...appState, hasCandidate: false },
+      review: { ...review, candidateHtmlUrl: null },
+      bento: { available: false, editorUrl: null, message: '準備中' },
+      slideView: 'current' as const,
+      slides: [{ id: 's1', title: '現在案のスライド', number: 1, sectionTitle: 'Main' }],
+    }
+    const candidateReview: HtmlReview = {
+      ...review,
+      candidateHtmlUrl: '/api/html/view/candidate/',
+      proposal: {
+        status: 'proposed', scope: 'local', summary: '説明を短くする', impactSummary: '対象以外への変更なし',
+        affectedSlides: [{ id: 's1', title: '変更案のスライド', number: 1, impact: 'changed' }],
+        postApplyReviewStatus: null,
+      },
+      canApply: true,
+    }
+    const candidateData = {
+      ...initialData,
+      state: { ...appState, hasCandidate: true },
+      review: candidateReview,
+      slideView: 'candidate' as const,
+      slides: [{ id: 's1', title: '変更案のスライド', number: 1, sectionTitle: 'Main' }],
+    }
+    vi.mocked(loadAppData).mockResolvedValueOnce(initialData).mockResolvedValue(candidateData)
+    vi.mocked(getAiStatus).mockResolvedValue(idleAi)
+    vi.mocked(startAiProposal).mockResolvedValue({
+      ...idleAi, status: 'succeeded', phase: 'succeeded', allowedStage: false,
+      message: '変更案を登録しました',
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '変更案を作成' }))
+
+    await waitFor(() => expect(startAiProposal).toHaveBeenCalledWith({ slideId: 's1', action: 'shorten', instruction: '' }))
+    expect(window.confirm).toHaveBeenCalledWith('現在案を変更せず、選択したスライドの確認用変更案をAIで作成しますか？')
+    expect(await screen.findByTitle('変更案のHTMLプレビュー')).toHaveAttribute('src', '/api/html/view/candidate/')
+    expect(screen.getAllByText('変更案のスライド').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '現在案' })).toBeInTheDocument()
+    expect(screen.getByText('説明を短くする')).toBeInTheDocument()
   })
 })

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyHtmlChange,
   approveHtmlDeck,
   getConversionStatus,
+  getAiStatus,
   getLifecycleStatus,
   loadAppData,
   startConversion,
+  startAiProposal,
   startLifecycleAction,
 } from './api/client'
 import { Inspector } from './components/Inspector'
@@ -14,6 +16,8 @@ import { SlideNavigator } from './components/SlideNavigator'
 import { initialReviewMarks, reviewedSlideIds } from './state/reviewState'
 import type {
   AppState,
+  AiProposalInput,
+  AiStatus,
   BentoIntegration,
   ConversionStatus,
   HtmlReview,
@@ -36,6 +40,8 @@ const modeLabels: Record<string, string> = {
   blocked: '確認が必要',
 }
 
+const POLL_DELAY_MS = 250
+
 export default function App() {
   const [project, setProject] = useState<ProjectResponse | null>(null)
   const [state, setState] = useState<AppState | null>(null)
@@ -44,6 +50,7 @@ export default function App() {
   const [bento, setBento] = useState<BentoIntegration | null>(null)
   const [conversion, setConversion] = useState<ConversionStatus | null>(null)
   const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null)
+  const [ai, setAi] = useState<AiStatus | null>(null)
   const [selectedSlide, setSelectedSlide] = useState<string | null>(null)
   const [selectedElement] = useState<string | null>(null)
   const [currentMode, setCurrentMode] = useState<AppState['mode'] | null>(null)
@@ -52,12 +59,26 @@ export default function App() {
   const [marks, setMarks] = useState<ReviewMarks>({})
   const [busy, setBusy] = useState(false)
   const [lifecycleRequestBusy, setLifecycleRequestBusy] = useState(false)
+  const [aiRequestBusy, setAiRequestBusy] = useState(false)
+  const [conversionSettling, setConversionSettling] = useState(false)
+  const [lifecycleSettling, setLifecycleSettling] = useState(false)
+  const [aiSettling, setAiSettling] = useState(false)
+  const [lastAiRequest, setLastAiRequest] = useState<AiProposalInput | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const mounted = useRef(true)
+  const htmlViewRef = useRef<HtmlView>('current')
+  const conversionGeneration = useRef(0)
+  const lifecycleGeneration = useRef(0)
+  const aiGeneration = useRef(0)
+  const conversionTimer = useRef<number | null>(null)
+  const lifecycleTimer = useRef<number | null>(null)
+  const aiTimer = useRef<number | null>(null)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (requestedView?: HtmlView) => {
     try {
-      const data = await loadAppData(htmlView)
+      const data = await loadAppData(requestedView ?? htmlViewRef.current)
+      if (!mounted.current) return
       setProject(data.project)
       setState(data.state)
       setSlides(data.slides)
@@ -70,82 +91,156 @@ export default function App() {
         selected && data.slides.some((slide) => slide.id === selected) ? selected : data.slides[0]?.id ?? null
       ))
       setHtmlView(data.slideView)
+      htmlViewRef.current = data.slideView
+      return true
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason))
+      return false
     }
-  }, [htmlView])
+  }, [])
 
-  useEffect(() => {
-    void refresh()
+  const chooseHtmlView = useCallback((view: HtmlView) => {
+    htmlViewRef.current = view
+    setHtmlView(view)
+    void refresh(view)
+  }, [refresh])
+
+  const trackConversion = useCallback((initial: ConversionStatus) => {
+    const generation = ++conversionGeneration.current
+    if (conversionTimer.current !== null) window.clearTimeout(conversionTimer.current)
+
+    const accept = async (result: ConversionStatus) => {
+      if (!mounted.current || generation !== conversionGeneration.current) return
+      if (result.status === 'running') {
+        setConversionSettling(false)
+        setConversion(result)
+        conversionTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+        return
+      }
+      setConversionSettling(true)
+      setConversion(result)
+      if (result.status === 'succeeded') setNotice('BentoSlideへの変換が完了しました。')
+      const refreshed = await refresh()
+      if (!mounted.current || generation !== conversionGeneration.current) return
+      if (!refreshed) {
+        conversionTimer.current = window.setTimeout(() => void accept(result), POLL_DELAY_MS)
+        return
+      }
+      setConversionSettling(false)
+    }
+
+    async function poll() {
+      try {
+        const result = await getConversionStatus()
+        await accept(result)
+      } catch (reason) {
+        if (!mounted.current || generation !== conversionGeneration.current) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        conversionTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+      }
+    }
+
+    void accept(initial)
+  }, [refresh])
+
+  const trackLifecycle = useCallback((initial: LifecycleStatus) => {
+    const generation = ++lifecycleGeneration.current
+    if (lifecycleTimer.current !== null) window.clearTimeout(lifecycleTimer.current)
+
+    const accept = async (result: LifecycleStatus) => {
+      if (!mounted.current || generation !== lifecycleGeneration.current) return
+      if (result.status === 'running') {
+        setLifecycleSettling(false)
+        setLifecycle(result)
+        lifecycleTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+        return
+      }
+      setLifecycleSettling(true)
+      setLifecycle(result)
+      if (result.status === 'succeeded') setNotice(result.message)
+      const refreshed = await refresh()
+      if (!mounted.current || generation !== lifecycleGeneration.current) return
+      if (!refreshed) {
+        lifecycleTimer.current = window.setTimeout(() => void accept(result), POLL_DELAY_MS)
+        return
+      }
+      setLifecycleSettling(false)
+    }
+
+    async function poll() {
+      try {
+        const result = await getLifecycleStatus()
+        await accept(result)
+      } catch (reason) {
+        if (!mounted.current || generation !== lifecycleGeneration.current) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        lifecycleTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+      }
+    }
+
+    void accept(initial)
+  }, [refresh])
+
+  const trackAi = useCallback((initial: AiStatus) => {
+    const generation = ++aiGeneration.current
+    if (aiTimer.current !== null) window.clearTimeout(aiTimer.current)
+
+    const accept = async (result: AiStatus) => {
+      if (!mounted.current || generation !== aiGeneration.current) return
+      if (result.status === 'running') {
+        setAiSettling(false)
+        setAi(result)
+        aiTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+        return
+      }
+      setAiSettling(true)
+      setAi(result)
+      const refreshed = await refresh(result.status === 'succeeded' ? 'candidate' : undefined)
+      if (!mounted.current || generation !== aiGeneration.current) return
+      if (!refreshed) {
+        aiTimer.current = window.setTimeout(() => void accept(result), POLL_DELAY_MS)
+        return
+      }
+      if (result.status === 'succeeded') setNotice('AIの変更案を作成しました。現在案はまだ変更していません。')
+      setAiSettling(false)
+    }
+
+    async function poll() {
+      try {
+        const result = await getAiStatus()
+        await accept(result)
+      } catch (reason) {
+        if (!mounted.current || generation !== aiGeneration.current) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        aiTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+      }
+    }
+
+    void accept(initial)
   }, [refresh])
 
   useEffect(() => {
-    let active = true
+    mounted.current = true
+    void refresh()
     void getConversionStatus()
-      .then((result) => { if (active) setConversion(result) })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)) })
-    return () => { active = false }
-  }, [])
-
-  useEffect(() => {
-    let active = true
+      .then((result) => result.status === 'running' ? trackConversion(result) : setConversion(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getLifecycleStatus()
-      .then((result) => { if (active) setLifecycle(result) })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)) })
-    return () => { active = false }
-  }, [])
-
-  useEffect(() => {
-    if (conversion?.status !== 'running') return
-    let active = true
-    const poll = async () => {
-      try {
-        const result = await getConversionStatus()
-        if (!active) return
-        setConversion(result)
-        if (result.status === 'succeeded') {
-          setNotice('BentoSlideへの変換が完了しました。')
-          await refresh()
-        } else if (result.status === 'failed') {
-          await refresh()
-        }
-      } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : String(reason))
-      }
-    }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 1000)
+      .then((result) => result.status === 'running' ? trackLifecycle(result) : setLifecycle(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+    void getAiStatus()
+      .then((result) => result.status === 'running' ? trackAi(result) : setAi(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     return () => {
-      active = false
-      window.clearInterval(timer)
+      mounted.current = false
+      conversionGeneration.current += 1
+      lifecycleGeneration.current += 1
+      aiGeneration.current += 1
+      if (conversionTimer.current !== null) window.clearTimeout(conversionTimer.current)
+      if (lifecycleTimer.current !== null) window.clearTimeout(lifecycleTimer.current)
+      if (aiTimer.current !== null) window.clearTimeout(aiTimer.current)
     }
-  }, [conversion?.status, refresh])
-
-  useEffect(() => {
-    if (lifecycle?.status !== 'running') return
-    let active = true
-    const poll = async () => {
-      try {
-        const result = await getLifecycleStatus()
-        if (!active) return
-        setLifecycle(result)
-        if (result.status === 'succeeded') {
-          setNotice(result.message)
-          await refresh()
-        } else if (result.status === 'failed') {
-          await refresh()
-        }
-      } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : String(reason))
-      }
-    }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 1000)
-    return () => {
-      active = false
-      window.clearInterval(timer)
-    }
-  }, [lifecycle?.status, refresh])
+  }, [refresh, trackAi, trackConversion, trackLifecycle])
 
   useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
@@ -193,11 +288,15 @@ export default function App() {
       : '承認済みHTMLをBentoSlideへ変換しますか？'
     if (!window.confirm(prompt)) return
     setBusy(true)
+    setConversionSettling(true)
     setError(null)
     setNotice(null)
     void startConversion()
-      .then(setConversion)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .then(trackConversion)
+      .catch((reason) => {
+        setConversionSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
       .finally(() => setBusy(false))
   }
 
@@ -219,11 +318,15 @@ export default function App() {
     }
     if (!window.confirm(prompts[action])) return
     setLifecycleRequestBusy(true)
+    setLifecycleSettling(true)
     setError(null)
     setNotice(null)
     void startLifecycleAction(action)
-      .then(setLifecycle)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .then(trackLifecycle)
+      .catch((reason) => {
+        setLifecycleSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
       .finally(() => setLifecycleRequestBusy(false))
   }
 
@@ -231,12 +334,30 @@ export default function App() {
     setMarks((current) => ({ ...current, [slideId]: mark }))
   }
 
-  const handleAiAction = (action: string) => {
-    setNotice(`${action}: AI integration is not enabled in this prototype.`)
+  const handleAiProposal = (input: AiProposalInput) => {
+    if (!window.confirm('現在案を変更せず、選択したスライドの確認用変更案をAIで作成しますか？')) return
+    setLastAiRequest(input)
+    setAiRequestBusy(true)
+    setAiSettling(true)
+    setError(null)
+    setNotice(null)
+    void startAiProposal(input)
+      .then(trackAi)
+      .catch((reason) => {
+        setAiSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+      .finally(() => setAiRequestBusy(false))
   }
 
-  const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running'
-  const processing = busy || lifecycleTransitioning || conversion?.status === 'running'
+  const handleRetryAiProposal = (input: AiProposalInput) => {
+    handleAiProposal(lastAiRequest ?? input)
+  }
+
+  const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running' || lifecycleSettling
+  const conversionTransitioning = conversion?.status === 'running' || conversionSettling
+  const aiTransitioning = aiRequestBusy || ai?.status === 'running' || aiSettling
+  const processing = busy || lifecycleTransitioning || conversionTransitioning || aiTransitioning
 
   if (!project || !state) {
     return (
@@ -268,9 +389,9 @@ export default function App() {
           review={review}
           htmlView={htmlView}
           selectedSlide={selectedSlide}
-          onViewChange={setHtmlView}
+          onViewChange={chooseHtmlView}
           bento={bento}
-          transitioning={lifecycleTransitioning}
+          transitioning={lifecycleTransitioning || conversionTransitioning}
         />
         <Inspector
           state={state}
@@ -281,6 +402,7 @@ export default function App() {
           busy={processing}
           conversion={conversion}
           lifecycle={lifecycle}
+          ai={ai}
           onSelectSlide={setSelectedSlide}
           onMark={handleMark}
           onApply={handleApply}
@@ -289,7 +411,8 @@ export default function App() {
           onStartConversion={() => handleConversion(false)}
           onRetryConversion={() => handleConversion(true)}
           onLifecycleAction={handleLifecycleAction}
-          onAiAction={handleAiAction}
+          onStartAiProposal={handleAiProposal}
+          onRetryAiProposal={handleRetryAiProposal}
         />
       </div>
 
