@@ -1,4 +1,4 @@
-import type { AppState, HtmlReview, ProjectResponse, SlideItem } from '../types'
+import type { AppState, HtmlReview, HtmlView, ProjectResponse, SlideItem } from '../types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -13,19 +13,21 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return payload as T
 }
 
-export async function loadAppData(): Promise<{
+export async function loadAppData(requestedView: HtmlView = 'current'): Promise<{
   project: ProjectResponse
   state: AppState
   slides: SlideItem[]
   review: HtmlReview | null
+  slideView: HtmlView
 }> {
-  const [project, state, slidesResponse] = await Promise.all([
+  const [project, state] = await Promise.all([
     request<ProjectResponse>('/api/project'),
     request<AppState>('/api/state'),
-    request<{ slides: SlideItem[] }>('/api/slides'),
   ])
   const review = state.mode === 'html-design' ? await request<HtmlReview>('/api/html/review') : null
-  return { project, state, slides: slidesResponse.slides, review }
+  const slideView = requestedView === 'candidate' && review?.candidateHtmlUrl ? 'candidate' : 'current'
+  const slidesResponse = await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)
+  return { project, state, slides: slidesResponse.slides, review, slideView }
 }
 
 export function applyHtmlChange(review: HtmlReview, reviewedSlideIds: string[]) {

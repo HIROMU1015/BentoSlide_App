@@ -33,7 +33,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await loadAppData()
+      const data = await loadAppData(htmlView)
       setProject(data.project)
       setState(data.state)
       setSlides(data.slides)
@@ -44,11 +44,11 @@ export default function App() {
       setSelectedSlide((selected) => (
         selected && data.slides.some((slide) => slide.id === selected) ? selected : data.slides[0]?.id ?? null
       ))
-      setHtmlView((view) => (view === 'candidate' && !data.review?.candidateHtmlUrl ? 'current' : view))
+      setHtmlView(data.slideView)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
-  }, [])
+  }, [htmlView])
 
   useEffect(() => {
     void refresh()

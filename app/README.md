@@ -30,7 +30,7 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 
 ## Windowsで起動
 
-リポジトリ直下の`start_bentoslide_app.cmd`をダブルクリックします。必要な場合だけfrontendをbuildし、Bento編集stageでは既存Work editorも起動した後、build済み画面をPython backendから`http://127.0.0.1:4180/`で配信します。HTML DesignはApp自身のsandboxed previewを使うため、別projectが既存preview portを利用中でも横取りしません。Node.jsがないPCでは、公式Node.js LTS zipを`output/app-tools/`へダウンロードし、公式SHA-256と照合したportable copyだけを使用します。
+リポジトリ直下の`start_bentoslide_app.cmd`をダブルクリックします。必要な場合だけfrontendをbuildし、Bento編集stageでは既存Work editorも起動した後、build済み画面をPython backendから`http://127.0.0.1:4180/`で配信します。HTML DesignはApp自身のsandboxed previewを使うため、別projectが既存preview portを利用中でも横取りしません。対応するNode.jsは`22.22.2`以降の22系、`24.15.0`以降の24系、または26以降です。対応Node.jsがないPCでは、公式Node.js LTS zipを`output/app-tools/`へダウンロードし、公式SHA-256と照合したportable copyだけを使用します。
 
 停止は`stop_bentoslide_app.cmd`です。Appが起動した既存preview/editorだけを識別して停止し、先に動いていた既存workspaceは残します。
 

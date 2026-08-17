@@ -45,18 +45,6 @@ def _active_proposal(state: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _can_approve_html_deck(state: dict[str, Any]) -> bool:
-    if state.get("workflow", {}).get("stage") != "html_review":
-        return False
-    proposal = state.get("authoring", {}).get("htmlChange")
-    if not isinstance(proposal, dict) or proposal.get("status") in {None, "cancelled"}:
-        return True
-    if proposal.get("status") != "applied":
-        return False
-    review = proposal.get("postApplyReview")
-    return isinstance(review, dict) and review.get("status") == "checked"
-
-
 def verified_local_session_url(
     repository: Path,
     *,
@@ -100,7 +88,6 @@ class WorkflowService:
         summary = user_status_summary(state)
         port = int(state.get("preview", {}).get("bentoPort") or 8765)
         bento_stages = {"bento_authoring", "content_review", "bento_finalization"}
-        can_approve = _can_approve_html_deck(state)
         editor_url = verified_local_session_url(
             self.repository,
             filename="work-editor-session.json",
@@ -112,7 +99,7 @@ class WorkflowService:
             stage=stage,
             statusLabel=str(summary["current"]),
             nextActionLabel=str(summary["next"]),
-            canConvert=stage == "ready_for_conversion" or can_approve,
+            canConvert=stage == "ready_for_conversion",
             canEditBento=stage in bento_stages,
             hasCandidate=_active_proposal(state) is not None,
             isBlocked=stage == "blocked",

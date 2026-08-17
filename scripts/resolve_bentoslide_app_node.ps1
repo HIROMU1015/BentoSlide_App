@@ -1,6 +1,34 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Test-BentoSlideAppNodeVersion {
+    param([Parameter(Mandatory = $true)][string]$VersionText)
+
+    if ($VersionText -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { return $false }
+    $version = [System.Version]$VersionText
+    if ($version.Major -eq 22) { return $version -ge [System.Version]'22.22.2' }
+    if ($version.Major -eq 24) { return $version -ge [System.Version]'24.15.0' }
+    return $version.Major -ge 26
+}
+
+function Invoke-BentoSlideAppNpm {
+    param(
+        [Parameter(Mandatory = $true)]$NodeResolution,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $nodeDirectory = Split-Path -Parent ([string]$NodeResolution.Node)
+    $previousPath = $env:Path
+    try {
+        $env:Path = $nodeDirectory + [System.IO.Path]::PathSeparator + $previousPath
+        & ([string]$NodeResolution.Npm) @Arguments | Out-Host
+        return $LASTEXITCODE
+    }
+    finally {
+        $env:Path = $previousPath
+    }
+}
+
 function Resolve-BentoSlideAppNode {
     param([Parameter(Mandatory = $true)][string]$Repository)
 
@@ -9,8 +37,7 @@ function Resolve-BentoSlideAppNode {
     if ($null -ne $systemNode -and $null -ne $systemNpm) {
         try {
             $versionText = (& $systemNode.Source --version).Trim().TrimStart('v')
-            $major = [int]($versionText.Split('.')[0])
-            if ($major -ge 20) {
+            if (Test-BentoSlideAppNodeVersion -VersionText $versionText) {
                 return [pscustomobject]@{ Node = $systemNode.Source; Npm = $systemNpm.Source; Source = 'system' }
             }
         }
@@ -21,8 +48,12 @@ function Resolve-BentoSlideAppNode {
     $toolsRoot = Join-Path $resolvedRepository 'output\app-tools'
     [System.IO.Directory]::CreateDirectory($toolsRoot) | Out-Null
     $releaseIndex = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 30
-    $release = $releaseIndex | Where-Object { $_.lts -and ($_.files -contains 'win-x64-zip') } | Select-Object -First 1
-    if ($null -eq $release) { throw 'The official Node.js release index has no Windows x64 LTS package.' }
+    $release = $releaseIndex | Where-Object {
+        $_.lts -and
+        ($_.files -contains 'win-x64-zip') -and
+        (Test-BentoSlideAppNodeVersion -VersionText ([string]$_.version).TrimStart('v'))
+    } | Select-Object -First 1
+    if ($null -eq $release) { throw 'The official Node.js release index has no compatible Windows x64 LTS package.' }
     $version = [string]$release.version
     if ($version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unexpected Node.js release version: $version" }
     $folderName = "node-$version-win-x64"

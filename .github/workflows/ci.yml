@@ -217,7 +217,7 @@ jobs:
 
   windows-launcher:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -227,8 +227,17 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-browser.txt
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/frontend/package-lock.json
+
       - name: Install launcher dependencies
-        run: python -m pip install -r requirements-browser.txt
+        run: |
+          python -m pip install -r requirements-browser.txt
+          npm ci --prefix app/frontend
+          npm run build --prefix app/frontend
 
       - name: Run Windows launcher tests
         shell: pwsh
@@ -241,6 +250,53 @@ jobs:
             $annotation = $testOutput.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error title=Windows launcher tests::$annotation"
             exit $testExitCode
+          }
+
+      - name: Smoke test BentoSlide App launcher
+        shell: pwsh
+        env:
+          BENTO_EDITOR_NO_PAUSE: "1"
+        run: |
+          $env:BENTO_PYTHON = (Get-Command python.exe).Source
+          $sessionPath = Join-Path $PWD "output/bentoslide-app-session.json"
+          $pidPath = Join-Path $PWD "output/bentoslide-app.pid"
+          $listener = $null
+          try {
+            & .\start_bentoslide_app.cmd -NoBrowser -NoClipboard
+            if ($LASTEXITCODE -ne 0) { throw "start_bentoslide_app.cmd failed: $LASTEXITCODE" }
+            $first = Get-Content $sessionPath -Raw -Encoding utf8 | ConvertFrom-Json
+            $health = Invoke-RestMethod -Uri ($first.url + "api/health")
+            if ($health.status -ne "ok") { throw "BentoSlide App health check failed" }
+
+            & .\start_bentoslide_app.cmd -NoBrowser -NoClipboard
+            if ($LASTEXITCODE -ne 0) { throw "duplicate app start failed: $LASTEXITCODE" }
+            $duplicate = Get-Content $sessionPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($duplicate.pid -ne $first.pid) { throw "duplicate app process was started" }
+
+            & .\stop_bentoslide_app.cmd
+            if ($LASTEXITCODE -ne 0) { throw "stop_bentoslide_app.cmd failed: $LASTEXITCODE" }
+            if (Get-Process -Id $first.pid -ErrorAction SilentlyContinue) { throw "BentoSlide App process is still running" }
+            if ((Test-Path $pidPath) -or (Test-Path $sessionPath)) { throw "BentoSlide App session files remain" }
+
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $busyPort = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $conflictOutput = (& .\start_bentoslide_app.cmd -Port $busyPort -NoBrowser -NoClipboard 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw "BentoSlide App accepted a conflicting port" }
+            if ($conflictOutput -notmatch "used by another service") { throw "Unexpected port-conflict error: $conflictOutput" }
+            if ((Test-Path $pidPath) -or (Test-Path $sessionPath)) { throw "Port conflict left app session files" }
+          }
+          finally {
+            if (Test-Path $sessionPath) { & .\stop_bentoslide_app.cmd }
+            if ($null -ne $listener) { $listener.Stop() }
+          }
+
+      - name: Stop BentoSlide App after failed smoke test
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path output/bentoslide-app-session.json) {
+            & .\stop_bentoslide_app.cmd
           }
 
       - name: Smoke test CMD launchers from a spaced Japanese path

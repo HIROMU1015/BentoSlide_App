@@ -92,13 +92,12 @@ try {
     $needsBuild = $RebuildFrontend -or -not (Test-Path -LiteralPath $distIndex -PathType Leaf) -or (Get-Item -LiteralPath $distIndex).LastWriteTimeUtc -lt $newestSource
     if ($needsBuild) {
         $node = Resolve-BentoSlideAppNode -Repository $repository
-        $npm = [string]$node.Npm
         if (-not (Test-Path -LiteralPath (Join-Path $frontend 'node_modules') -PathType Container)) {
-            & $npm ci --prefix $frontend
-            if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+            $npmExitCode = Invoke-BentoSlideAppNpm -NodeResolution $node -Arguments @('ci', '--prefix', $frontend)
+            if ($npmExitCode -ne 0) { throw 'Frontend dependency installation failed.' }
         }
-        & $npm run build --prefix $frontend
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $distIndex -PathType Leaf)) { throw 'Frontend build failed.' }
+        $npmExitCode = Invoke-BentoSlideAppNpm -NodeResolution $node -Arguments @('run', 'build', '--prefix', $frontend)
+        if ($npmExitCode -ne 0 -or -not (Test-Path -LiteralPath $distIndex -PathType Leaf)) { throw 'Frontend build failed.' }
     }
 
     $routeJson = & $python.Executable -m scripts.deck_workflow --root $repository route --json 2>&1

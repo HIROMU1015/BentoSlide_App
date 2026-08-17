@@ -611,6 +611,23 @@ class HtmlPreviewHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
+            self.wfile.flush()
+
+    def _discard_bounded_request_body(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if length < 1 or length > MAX_ACTION_BODY_BYTES:
+            return
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(0.25)
+            self.rfile.read(length)
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def _json(self, status: HTTPStatus, value: dict[str, Any]) -> None:
         self._send(status, (json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8"), "application/json; charset=utf-8")
@@ -629,9 +646,11 @@ class HtmlPreviewHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin") or ""
         token = self.headers.get("X-Bento-Preview-Token") or ""
         if not hmac.compare_digest(host, expected_authority) or not hmac.compare_digest(origin, expected_origin):
+            self._discard_bounded_request_body()
             self._json(HTTPStatus.FORBIDDEN, {"error": "HTML preview action origin is not allowed"})
             return
         if not hmac.compare_digest(token, self.server.action_token):
+            self._discard_bounded_request_body()
             self._json(HTTPStatus.FORBIDDEN, {"error": "HTML preview action token is invalid"})
             return
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()

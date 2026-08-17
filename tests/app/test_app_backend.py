@@ -156,6 +156,26 @@ class HtmlReviewServiceTests(unittest.TestCase):
 
 
 class WorkflowServiceViewTests(unittest.TestCase):
+    def test_can_convert_only_after_html_deck_approval(self) -> None:
+        service = WorkflowService(Path.cwd())
+        for stage, expected in (("html_review", False), ("ready_for_conversion", True)):
+            with self.subTest(stage=stage):
+                state = {
+                    "workflow": {"stage": stage, "currentSection": None, "currentChapter": None, "blockingReason": None},
+                    "preview": {"bentoPort": 8765},
+                    "project": {"title": "Fixture", "kind": "fixture"},
+                    "authoring": {"strategy": "whole_deck", "htmlChange": None},
+                    "approvals": {"bentoContent": {"status": "pending"}, "finalBento": "pending"},
+                    "sections": {},
+                }
+                with mock.patch("app.backend.services.workflow_service.load_state", return_value=state), \
+                     mock.patch(
+                         "app.backend.services.workflow_service.user_status_summary",
+                         return_value={"current": "Fixture", "next": "Fixture", "route": "html-preview", "validActions": [], "blockingReason": None},
+                     ):
+                    view = service.state_view()
+                self.assertEqual(view.canConvert, expected)
+
     def test_foreign_repository_session_url_is_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
