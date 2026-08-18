@@ -2333,6 +2333,10 @@ def command_propose_html_change(
     impact_summary: str,
     requested_slide_ids: Iterable[str],
     related_slide_ids: Iterable[str],
+    expected_base_html_revision: str | None = None,
+    expected_base_registry_revision: str | None = None,
+    expected_base_review_digest: str | None = None,
+    expected_state_revision: str | None = None,
 ) -> dict[str, Any]:
     """Snapshot a candidate and calculate impact without mutating canonical HTML."""
 
@@ -2341,12 +2345,27 @@ def command_propose_html_change(
         raise WorkflowError("HTML change proposals require whole-deck authoring")
     if _has_unfinished_html_change(state):
         raise WorkflowError("Resolve the active HTML change proposal before creating another")
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    state_path = root / STATE_RELATIVE
+    expected_base_revisions = (
+        ("canonical HTML", canonical_html, expected_base_html_revision),
+        ("canonical registry", canonical_registry, expected_base_registry_revision),
+        ("deck state", state_path, expected_state_revision),
+    )
+    for label, path, expected in expected_base_revisions:
+        actual = file_revision(path)
+        if expected is not None and actual != expected:
+            raise WorkflowError(f"AI proposal base {label} changed before registration")
     base_evidence = _require_current_html_review(root, state)
+    if (
+        expected_base_review_digest is not None
+        and base_evidence.review_digest != expected_base_review_digest
+    ):
+        raise WorkflowError("AI proposal HTML review changed before registration")
     source_candidate = _repo_path(root, str(candidate_html), field="html-change.candidateHtml")
     if not source_candidate.is_file():
         raise WorkflowError(f"HTML change candidate does not exist: {source_candidate}")
-    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
-    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
     if source_candidate == canonical_html:
         raise WorkflowError("Create an HTML change candidate instead of editing the canonical HTML directly")
     source_registry = (
@@ -2416,7 +2435,7 @@ def command_propose_html_change(
     next_state = copy.deepcopy(state)
     next_state["authoring"]["htmlChange"] = proposal
     validate_state(root, next_state)
-    state_path = root / STATE_RELATIVE
+    bound_state_revision = expected_state_revision or file_revision(state_path)
     payloads = {
         snapshot_html: candidate_html_payload,
         snapshot_registry: candidate_registry_payload,
@@ -2435,13 +2454,23 @@ def command_propose_html_change(
     }
 
     def validate_base() -> None:
+        for label, path, expected in expected_base_revisions:
+            if expected is not None and file_revision(path) != expected:
+                raise WorkflowError(f"AI proposal base {label} changed before registration")
         for path, expected in input_revisions.items():
             if file_revision(path) != expected:
                 raise WorkflowError(f"HTML change input changed while creating the proposal: {path.name}")
         current_state = load_state(root)
+        if file_revision(state_path) != bound_state_revision or current_state != state:
+            raise WorkflowError("Deck state changed while creating the proposal")
         current_evidence = _require_current_html_review(root, current_state)
         if current_evidence.review_digest != proposal["baseReviewDigest"]:
             raise WorkflowError("Whole-deck HTML review changed while creating the proposal")
+        if (
+            expected_base_review_digest is not None
+            and current_evidence.review_digest != expected_base_review_digest
+        ):
+            raise WorkflowError("AI proposal HTML review changed before registration")
         for relative, expected in {
             **proposal["baseDependencyRevisions"],
             **proposal["candidateDependencyRevisions"],

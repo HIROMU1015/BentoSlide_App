@@ -52,12 +52,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-browser.txt
+          cache-dependency-path: |
+            requirements-browser.txt
+            requirements-ai.txt
 
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-browser.txt
+          python -m pip install -r requirements-browser.txt -r requirements-ai.txt
 
       - name: Build and validate deterministic demo
         run: |
@@ -291,6 +293,7 @@ jobs:
             finally { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
             if ($conflictExitCode -eq 0) { throw "BentoSlide App accepted a conflicting port" }
             if ($conflictOutput -notmatch "used by another service") { throw "Unexpected port-conflict error: $conflictOutput" }
+            if ($conflictOutput -match "Started server process") { throw "Port conflict printed stale backend stderr: $conflictOutput" }
             if ((Test-Path $pidPath) -or (Test-Path $sessionPath)) { throw "Port conflict left app session files" }
           }
           finally {
@@ -330,7 +333,9 @@ jobs:
             $script:callNumber += 1
             $stdout = Join-Path $copy "launcher-call-$script:callNumber.log"
             $stderr = Join-Path $copy "launcher-call-$script:callNumber.error.log"
-            $commandLine = "/d /s /c `"`"$Path`" $Arguments`""
+            # Explorer commonly starts Windows PowerShell 5.1 from a CP932 console.
+            # Reproduce that boundary so UTF-8 native JSON decoding is covered.
+            $commandLine = "/d /s /c `"chcp 932 >nul & call `"$Path`" $Arguments`""
             $process = Start-Process -FilePath cmd.exe -ArgumentList $commandLine -PassThru `
               -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             if (-not $process.WaitForExit(60000)) {

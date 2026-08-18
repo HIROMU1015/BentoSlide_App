@@ -464,4 +464,38 @@ describe('App AI proposal workflow', () => {
     expect(screen.getByRole('button', { name: '現在案' })).toBeInTheDocument()
     expect(screen.getByText('説明を短くする')).toBeInTheDocument()
   })
+
+  it('retries with the action and instruction currently shown in the form', async () => {
+    const initialData = {
+      project: { project: { title: 'AI Fixture', kind: 'fixture' } },
+      state: { ...appState, hasCandidate: false },
+      review: { ...review, candidateHtmlUrl: null },
+      bento: { available: false, editorUrl: null, message: 'Preparing' },
+      slideView: 'current' as const,
+      slides: [{ id: 's1', title: 'Current slide', number: 1, sectionTitle: 'Main' }],
+    }
+    vi.mocked(loadAppData).mockResolvedValue(initialData)
+    vi.mocked(getAiStatus).mockResolvedValue(idleAi)
+    vi.mocked(startAiProposal).mockResolvedValue({
+      ...idleAi, status: 'failed', phase: 'failed', message: 'Proposal failed',
+      error: 'Please retry', retryable: true,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '変更案を作成' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Please retry')
+
+    fireEvent.click(screen.getByRole('button', { name: '自由に変更' }))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '新しい指示' } })
+    fireEvent.click(screen.getByRole('button', { name: '再試行' }))
+
+    await waitFor(() => expect(startAiProposal).toHaveBeenCalledTimes(2))
+    expect(startAiProposal).toHaveBeenNthCalledWith(1, {
+      slideId: 's1', action: 'shorten', instruction: '',
+    })
+    expect(startAiProposal).toHaveBeenNthCalledWith(2, {
+      slideId: 's1', action: 'custom', instruction: '新しい指示',
+    })
+  })
 })

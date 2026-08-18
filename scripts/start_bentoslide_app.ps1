@@ -100,8 +100,14 @@ try {
         if ($npmExitCode -ne 0 -or -not (Test-Path -LiteralPath $distIndex -PathType Leaf)) { throw 'Frontend build failed.' }
     }
 
-    $routeJson = & $python.Executable -X utf8 -m scripts.deck_workflow --root $repository route --json 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "Cannot resolve the current BentoSlide workspace: $($routeJson -join ' ')" }
+    $previousConsoleEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    try {
+        $routeJson = & $python.Executable -X utf8 -m scripts.deck_workflow --root $repository route --json 2>&1
+        $routeExitCode = $LASTEXITCODE
+    }
+    finally { [Console]::OutputEncoding = $previousConsoleEncoding }
+    if ($routeExitCode -ne 0) { throw "Cannot resolve the current BentoSlide workspace: $($routeJson -join ' ')" }
     $workspaceRoute = ($routeJson -join "`n" | ConvertFrom-Json).route
     if ($workspaceRoute -in @('authoring-editor', 'final-editor')) {
         $editorExisted = Test-Path -LiteralPath (Join-Path $stateDirectory 'work-editor-session.json') -PathType Leaf
@@ -155,7 +161,9 @@ catch {
     if ($createdSession) { Remove-Item -LiteralPath $pidPath,$sessionPath -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $logPath) { Add-Content -LiteralPath $logPath -Value @("failedAt=$([System.DateTimeOffset]::Now.ToString('o'))", "error=$($_.Exception.Message)", 'status=failed') -Encoding utf8 }
     Write-Host $_.Exception.Message -ForegroundColor Red
-    if (Test-Path -LiteralPath $stderrLogPath) { Get-Content -LiteralPath $stderrLogPath -Tail 20 -ErrorAction SilentlyContinue }
+    if ($startedProcessId -gt 0 -and (Test-Path -LiteralPath $stderrLogPath)) {
+        Get-Content -LiteralPath $stderrLogPath -Tail 20 -Encoding utf8 -ErrorAction SilentlyContinue
+    }
     exit 1
 }
 finally { Exit-BentoLauncherLock -Handle $lockHandle }

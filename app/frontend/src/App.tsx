@@ -63,7 +63,6 @@ export default function App() {
   const [conversionSettling, setConversionSettling] = useState(false)
   const [lifecycleSettling, setLifecycleSettling] = useState(false)
   const [aiSettling, setAiSettling] = useState(false)
-  const [lastAiRequest, setLastAiRequest] = useState<AiProposalInput | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const mounted = useRef(true)
@@ -336,7 +335,6 @@ export default function App() {
 
   const handleAiProposal = (input: AiProposalInput) => {
     if (!window.confirm('現在案を変更せず、選択したスライドの確認用変更案をAIで作成しますか？')) return
-    setLastAiRequest(input)
     setAiRequestBusy(true)
     setAiSettling(true)
     setError(null)
@@ -351,7 +349,7 @@ export default function App() {
   }
 
   const handleRetryAiProposal = (input: AiProposalInput) => {
-    handleAiProposal(lastAiRequest ?? input)
+    handleAiProposal(input)
   }
 
   const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running' || lifecycleSettling

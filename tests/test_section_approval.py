@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import yaml
 
-from bento_converter.artifact_transaction import ArtifactTransactionStore
+from bento_converter.artifact_transaction import ArtifactTransactionStore, file_revision
 from bento_converter.html_change import analyze_html_change
 from bento_converter.html_change_review import (
     HtmlChangeBrowserEvidence,
@@ -407,6 +407,59 @@ class SingleHtmlWorkflowTests(unittest.TestCase):
         screenshot_path.write_bytes(screenshot_payload)
         command_approve_html_deck(self.root, checked)
         self.assertEqual(load_state(self.root)["workflow"]["stage"], "ready_for_conversion")
+
+    def test_ai_proposal_registration_rejects_a_stale_expected_base(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        registry_path = self.root / "deck/deck.registry.json"
+        candidate = self.candidate(
+            canonical_path.read_text(encoding="utf-8").replace("Method", "Updated method")
+        )
+        review_digest = state["authoring"]["htmlReview"]["evidenceDigest"]
+
+        with self.assertRaisesRegex(WorkflowError, "base canonical HTML changed"):
+            command_propose_html_change(
+                self.root, state, candidate_html=candidate, candidate_registry=None,
+                request="Update method", summary="Update the method slide",
+                impact_summary="Only the method slide changes",
+                requested_slide_ids=["method-1"], related_slide_ids=[],
+                expected_base_html_revision="sha256:" + "0" * 64,
+                expected_base_registry_revision=file_revision(registry_path),
+                expected_base_review_digest=review_digest,
+                expected_state_revision=file_revision(self.root / "deck.yaml"),
+            )
+
+        self.assertIsNone(load_state(self.root)["authoring"]["htmlChange"])
+
+    def test_ai_proposal_registration_rechecks_expected_base_inside_transaction(self) -> None:
+        state = self.whole_deck_review()
+        canonical_path = self.root / "deck/deck.preview.html"
+        registry_path = self.root / "deck/deck.registry.json"
+        candidate = self.candidate(
+            canonical_path.read_text(encoding="utf-8").replace("Method", "Updated method")
+        )
+        original_commit = ArtifactTransactionStore.commit
+
+        def racing_commit(store, payloads, **kwargs):
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["document"]["title"] = "Concurrent registry edit"
+            registry_path.write_text(json.dumps(registry, ensure_ascii=False), encoding="utf-8")
+            return original_commit(store, payloads, **kwargs)
+
+        with patch.object(ArtifactTransactionStore, "commit", new=racing_commit):
+            with self.assertRaisesRegex(WorkflowError, "base canonical registry changed"):
+                command_propose_html_change(
+                    self.root, state, candidate_html=candidate, candidate_registry=None,
+                    request="Update method", summary="Update the method slide",
+                    impact_summary="Only the method slide changes",
+                    requested_slide_ids=["method-1"], related_slide_ids=[],
+                    expected_base_html_revision=file_revision(canonical_path),
+                    expected_base_registry_revision=file_revision(registry_path),
+                    expected_base_review_digest=state["authoring"]["htmlReview"]["evidenceDigest"],
+                    expected_state_revision=file_revision(self.root / "deck.yaml"),
+                )
+
+        self.assertIsNone(load_state(self.root)["authoring"]["htmlChange"])
 
     def test_change_impact_expands_for_related_slides_and_global_css(self) -> None:
         state = self.whole_deck_review()

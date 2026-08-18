@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from bento_converter.artifact_transaction import bytes_revision, file_revision
 from bento_converter.html_change import HtmlChangeImpact, analyze_html_change
 from bento_converter.section_approval import read_html_deck_outline
 from scripts.deck_workflow import (
@@ -37,6 +38,7 @@ RESULT_FORMAT = "bento/ai-proposal-result/v1"
 MAX_HTML_BYTES = 12 * 1024 * 1024
 MAX_REGISTRY_BYTES = 2 * 1024 * 1024
 MAX_RESULT_BYTES = 128 * 1024
+STALE_INPUT_MESSAGE = "AI実行中に現在案が変更されました。最新の内容から再試行してください。"
 RELEVANT_SPECIFICATIONS = (
     "docs/html-change-review.md",
     "docs/html-first-authoring-contract.md",
@@ -63,21 +65,19 @@ class CodexSdkAdapter:
         self.model = model or os.environ.get("BENTOSLIDE_AI_MODEL") or None
 
     @staticmethod
-    def _imports() -> tuple[Any, Any, Any]:
-        from openai_codex import AsyncCodex, CodexConfig, Sandbox
+    def _imports() -> tuple[Any, Any, Any, Any]:
+        from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
 
-        return AsyncCodex, CodexConfig, Sandbox
+        return AsyncCodex, CodexConfig, Sandbox, ApprovalMode
 
     @staticmethod
     def _config(config_type: Any, workspace: Path) -> Any:
         return config_type(
             cwd=str(workspace),
             config_overrides=(
-                'approval_policy="never"',
                 'web_search="disabled"',
                 "sandbox_workspace_write.network_access=false",
                 "sandbox_workspace_write.writable_roots=[]",
-                "agents.enabled=false",
                 'history.persistence="none"',
             ),
             client_name="bentoslide_app",
@@ -85,7 +85,7 @@ class CodexSdkAdapter:
         )
 
     async def _account_available(self) -> bool:
-        async_codex, config_type, _sandbox = self._imports()
+        async_codex, config_type, _sandbox, _approval_mode = self._imports()
         async with async_codex(self._config(config_type, Path.cwd())) as codex:
             response = await codex.account(refresh_token=False)
             return getattr(response, "account", None) is not None
@@ -107,7 +107,7 @@ class CodexSdkAdapter:
         return AdapterAvailability(True)
 
     async def _generate(self, workspace: Path, prompt: str) -> None:
-        async_codex, config_type, sandbox = self._imports()
+        async_codex, config_type, sandbox, approval_mode = self._imports()
         async with async_codex(self._config(config_type, workspace)) as codex:
             account = await codex.account(refresh_token=False)
             if getattr(account, "account", None) is None:
@@ -117,12 +117,14 @@ class CodexSdkAdapter:
                 ephemeral=True,
                 model=self.model,
                 sandbox=sandbox.workspace_write,
+                approval_mode=approval_mode.deny_all,
             )
             result = await thread.run(
                 prompt,
                 cwd=str(workspace),
                 model=self.model,
                 sandbox=sandbox.workspace_write,
+                approval_mode=approval_mode.deny_all,
             )
             if getattr(result, "error", None) is not None:
                 raise RuntimeError("Codex did not complete the proposal")
@@ -197,11 +199,78 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+JAPANESE_GRAMMAR_BOUNDARY = re.compile(
+    r"(?:して(?:い|お|み)?る|されている|される|できる|である|でした|です|ます|"
+    r"ない|から|まで|より|など|では|には|とは|へは|[はがをにへとのもやで])"
+)
+
+
+def _japanese_content_terms(value: str) -> set[str]:
+    terms: set[str] = set()
+    for part in JAPANESE_GRAMMAR_BOUNDARY.split(value):
+        if len(part) >= 2 or re.search(r"[一-龯々〆ヵヶ]", part):
+            terms.add(part)
+    return terms
+
+
 def _visible_tokens(text: str) -> set[str]:
-    return {
+    tokens = {
         token.casefold()
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]+|[一-龯ぁ-んァ-ンー]{2,}", text)
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]+", text)
     }
+    for japanese_run in re.findall(r"[一-龯々〆ヵヶぁ-んァ-ヴー]+", text):
+        tokens.update(_japanese_content_terms(japanese_run))
+    return tokens
+
+
+def _is_japanese_term(token: str) -> bool:
+    return re.fullmatch(r"[一-龯々〆ヵヶぁ-んァ-ヴー]+", token) is not None
+
+
+def _japanese_term_is_supported(token: str, authority_terms: set[str]) -> bool:
+    """Allow shortening/compaction while rejecting unseen Japanese content terms."""
+
+    if any(token in authority for authority in authority_terms):
+        return True
+    if len(token) < 2:
+        return False
+    reachable = {0}
+    for start in range(len(token)):
+        if start not in reachable:
+            continue
+        for end in range(start + 2, len(token) + 1):
+            fragment = token[start:end]
+            if any(fragment in authority for authority in authority_terms):
+                reachable.add(end)
+    return len(token) in reachable
+
+
+def _unsupported_visible_tokens(candidate_text: str, authority_text: str) -> list[str]:
+    authority_tokens = _visible_tokens(authority_text)
+    authority_japanese = {token for token in authority_tokens if _is_japanese_term(token)}
+    unsupported: list[str] = []
+    for token in _visible_tokens(candidate_text):
+        if token in authority_tokens:
+            continue
+        if _is_japanese_term(token) and _japanese_term_is_supported(token, authority_japanese):
+            continue
+        unsupported.append(token)
+    return sorted(unsupported)
+
+
+def _state_revision(state: dict[str, Any]) -> str:
+    payload = yaml.safe_dump(state, allow_unicode=True, sort_keys=True).encode("utf-8")
+    return bytes_revision(payload)
+
+
+def _html_review_digest(state: dict[str, Any]) -> str | None:
+    review = state.get("authoring", {}).get("htmlReview")
+    digest = review.get("evidenceDigest") if isinstance(review, dict) else None
+    return digest if isinstance(digest, str) else None
+
+
+class _StaleAiInputs(WorkflowError):
+    pass
 
 
 def _authority_text(path: Path) -> str:
@@ -439,12 +508,12 @@ class AiProposalService:
             context = self._prepare_workspace(workspace, slide_id, action, instruction)
             self._update(workspace, "running-agent", "選択したスライドの変更案を作成しています。")
             self.adapter.generate(workspace, self._prompt())
+            self._require_current_inputs(context)
             self._update(workspace, "validating-candidate", "AIの変更案を既存ルールで検証しています。")
             result, impact = self._validate_outputs(workspace, context)
             self._update(workspace, "registering-proposal", "確認用の変更案を登録しています。")
             current = self._state()
-            if not self._is_allowed_state(current):
-                raise WorkflowError("AI実行中にHTML確認状態が変わりました。最新状態から再試行してください")
+            self._require_current_inputs(context, state=current)
             self._propose(
                 self.repository,
                 current,
@@ -455,6 +524,10 @@ class AiProposalService:
                 impact_summary=result.impactSummary,
                 requested_slide_ids=[slide_id],
                 related_slide_ids=list(impact.related_slide_ids),
+                expected_base_html_revision=context["canonical_html_revision"],
+                expected_base_registry_revision=context["canonical_registry_revision"],
+                expected_base_review_digest=context["html_review_digest"],
+                expected_state_revision=context["deck_state_revision"],
             )
             self._marker(workspace, status="succeeded", phase="succeeded")
             with self._lock:
@@ -467,9 +540,13 @@ class AiProposalService:
                     phase="succeeded",
                     message="AIの変更案を確認用に登録しました。現在案は変更していません。",
                 )
-        except BaseException:
+        except BaseException as exc:
             LOGGER.exception("AI proposal generation failed")
-            message = "AIの変更案を安全に登録できませんでした。内容を変えて再試行してください。"
+            message = (
+                STALE_INPUT_MESSAGE
+                if isinstance(exc, _StaleAiInputs)
+                else "AIの変更案を安全に登録できませんでした。内容を変えて再試行してください。"
+            )
             try:
                 self._marker(workspace, status="failed", phase="failed")
             except OSError:
@@ -520,10 +597,16 @@ class AiProposalService:
         return {
             "state": state,
             "canonical_html": canonical_html,
+            "canonical_registry": canonical_registry,
             "slide_id": slide_id,
             "action": action,
             "html_payload": html_payload,
             "registry_payload": registry_payload,
+            "canonical_html_revision": bytes_revision(html_payload),
+            "canonical_registry_revision": bytes_revision(registry_payload),
+            "html_review_digest": _html_review_digest(state),
+            "workflow_state_revision": _state_revision(state),
+            "deck_state_revision": file_revision(self.repository / "deck.yaml"),
             "input_hashes": {
                 path.relative_to(workspace).as_posix(): _sha256(path.read_bytes())
                 for path in inputs.rglob("*") if path.is_file()
@@ -533,6 +616,33 @@ class AiProposalService:
                 _authority_text(path) for path in (inputs / "sources").rglob("*") if path.is_file()
             ),
         }
+
+    def _require_current_inputs(
+        self, context: dict[str, Any], *, state: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            current = state if state is not None else self._state()
+            authoring = current.get("authoring", {})
+            current_html = _repo_path(
+                self.repository, authoring["entryHtml"], field="authoring.entryHtml",
+            )
+            current_registry = _repo_path(
+                self.repository, authoring["registry"], field="authoring.registry",
+            )
+            current_values = (
+                self._is_allowed_state(current),
+                current_html == context["canonical_html"],
+                current_registry == context["canonical_registry"],
+                file_revision(current_html) == context["canonical_html_revision"],
+                file_revision(current_registry) == context["canonical_registry_revision"],
+                _html_review_digest(current) == context["html_review_digest"],
+                _state_revision(current) == context["workflow_state_revision"],
+                file_revision(self.repository / "deck.yaml") == context["deck_state_revision"],
+            )
+        except BaseException as exc:
+            raise _StaleAiInputs(STALE_INPUT_MESSAGE) from exc
+        if not all(current_values):
+            raise _StaleAiInputs(STALE_INPUT_MESSAGE)
 
     def _copy_primary_sources(self, state: dict[str, Any], destination: Path) -> set[str]:
         manifest = _repo_path(
@@ -640,7 +750,7 @@ Do not approve, apply, or edit the canonical deck. Finish only after all three o
             raise WorkflowError("AI結果が存在しないrelated slideを参照しています")
 
         impact = self._analyze(
-            base_html=context["canonical_html"],
+            base_html=workspace / "inputs/current.html",
             base_registry=base_registry,
             candidate_html=html_path,
             candidate_registry=candidate_registry,
@@ -668,9 +778,9 @@ Do not approve, apply, or edit the canonical deck. Finish only after all three o
     ) -> None:
         base_meta = _html_metadata(base_html)
         candidate_meta = _html_metadata(candidate_html)
-        authority_tokens = _visible_tokens(" ".join(base_meta.visible_parts) + "\n" + authority_text)
-        unprovenanced_tokens = sorted(
-            _visible_tokens(" ".join(candidate_meta.visible_parts)) - authority_tokens
+        unprovenanced_tokens = _unsupported_visible_tokens(
+            " ".join(candidate_meta.visible_parts),
+            " ".join(base_meta.visible_parts) + "\n" + authority_text,
         )
         if unprovenanced_tokens:
             raise WorkflowError("AI候補にprimary sourceで確認できない新しい記述があります")

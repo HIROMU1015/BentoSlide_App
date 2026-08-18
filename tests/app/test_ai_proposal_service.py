@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+import importlib.util
+import inspect
 import json
 import tempfile
 import threading
@@ -14,6 +17,7 @@ from app.backend.main import create_app
 from app.backend.services.ai_proposal_service import (
     AdapterAvailability,
     AiProposalService,
+    CodexSdkAdapter,
     JOB_FORMAT,
     RESULT_FORMAT,
 )
@@ -34,7 +38,7 @@ def _registry() -> dict:
 def _html() -> str:
     return """<!doctype html><html><head><style>.slide{width:1280px;height:720px}</style></head><body>
 <main data-bento-deck>
-<section class="slide" data-slide-id="s1" data-section-id="main"><h1 data-bento-id="s1-title">Alpha details</h1></section>
+<section class="slide" data-slide-id="s1" data-section-id="main"><h1 data-bento-id="s1-title">Alpha details</h1><p data-bento-id="s1-body">市場規模は拡大している</p></section>
 <section class="slide" data-slide-id="s2" data-section-id="main"><h1 data-bento-id="s2-title">Beta details</h1></section>
 </main></body></html>"""
 
@@ -77,6 +81,12 @@ class FakeAdapter:
             candidate = current.replace("Alpha details", "Alpha 999")
         elif self.mode == "invented-fact":
             candidate = current.replace("Alpha details", "Gamma claim")
+        elif self.mode == "japanese-shorten":
+            candidate = candidate.replace("市場規模は拡大している", "市場は拡大")
+        elif self.mode == "invented-japanese-fact":
+            candidate = candidate.replace("市場規模は拡大している", "市場は縮小")
+        elif self.mode == "invented-hiragana-fact":
+            candidate = candidate.replace("市場規模は拡大している", "市場はすくない")
         elif self.mode == "unrelated-change":
             candidate = current.replace("Beta details", "Changed Beta")
         elif self.mode == "mutate-input":
@@ -128,7 +138,9 @@ class AiProposalServiceTests(unittest.TestCase):
         (self.root / "deck/current.registry.json").write_text(
             json.dumps(_registry(), ensure_ascii=False), encoding="utf-8",
         )
-        (self.root / "sources/primary.md").write_text("Alpha Beta source", encoding="utf-8")
+        (self.root / "sources/primary.md").write_text(
+            "Alpha Beta source\n市場規模は拡大している\n", encoding="utf-8",
+        )
         (self.root / "sources/source-manifest.yaml").write_text(
             "schemaVersion: 1\nitems:\n  - id: primary\n    path: sources/primary.md\n    role: primary\n",
             encoding="utf-8",
@@ -144,6 +156,7 @@ class AiProposalServiceTests(unittest.TestCase):
                 "entryHtml": "deck/current.html",
                 "registry": "deck/current.registry.json",
                 "htmlChange": None,
+                "htmlReview": {"evidenceDigest": "sha256:review-current"},
             },
             "sources": {"manifest": "sources/source-manifest.yaml"},
         }
@@ -201,7 +214,7 @@ class AiProposalServiceTests(unittest.TestCase):
     def test_invalid_or_overbroad_agent_outputs_never_register_a_proposal(self) -> None:
         for mode in (
             "requested-mismatch", "incomplete", "registry-mismatch", "invented-number", "invented-fact",
-            "unrelated-change", "mutate-input",
+            "unrelated-change", "mutate-input", "invented-japanese-fact", "invented-hiragana-fact",
         ):
             with self.subTest(mode=mode):
                 self.state["authoring"]["htmlChange"] = None
@@ -211,6 +224,144 @@ class AiProposalServiceTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertTrue(result.retryable)
         self.assertEqual(self.proposals, [])
+
+    def test_japanese_shortening_is_not_mistaken_for_a_new_fact(self) -> None:
+        service = self.service("japanese-shorten")
+
+        service.start(slide_id="s1", action="shorten", instruction="")
+
+        self.assertEqual(self.wait_for_terminal(service).status, "succeeded")
+        self.assertEqual(len(self.proposals), 1)
+
+    def test_canonical_inputs_changed_during_generation_reject_stale_candidate(self) -> None:
+        for changed_input in ("html", "registry", "review", "deck"):
+            with self.subTest(changed_input=changed_input):
+                self.state["authoring"]["htmlChange"] = None
+                self.state["authoring"]["htmlReview"]["evidenceDigest"] = "sha256:review-current"
+                (self.root / "deck/current.html").write_text(_html(), encoding="utf-8")
+                (self.root / "deck/current.registry.json").write_text(
+                    json.dumps(_registry(), ensure_ascii=False), encoding="utf-8",
+                )
+                (self.root / "deck.yaml").write_text("sentinel: unchanged\n", encoding="utf-8")
+                adapter = BlockingAdapter()
+                service = AiProposalService(
+                    self.root,
+                    adapter=adapter,
+                    state_loader=lambda _root: copy.deepcopy(self.state),
+                    propose=lambda *_args, **kwargs: self.proposals.append(kwargs),
+                )
+                service.start(slide_id="s1", action="shorten", instruction="")
+                self.assertTrue(adapter.entered.wait(2))
+                if changed_input == "html":
+                    path = self.root / "deck/current.html"
+                    path.write_text(
+                        path.read_text(encoding="utf-8").replace("Alpha details", "Externally changed"),
+                        encoding="utf-8",
+                    )
+                elif changed_input == "registry":
+                    path = self.root / "deck/current.registry.json"
+                    registry = json.loads(path.read_text(encoding="utf-8"))
+                    registry["document"]["title"] = "Externally changed"
+                    path.write_text(json.dumps(registry, ensure_ascii=False), encoding="utf-8")
+                elif changed_input == "review":
+                    self.state["authoring"]["htmlReview"]["evidenceDigest"] = "sha256:review-new"
+                else:
+                    (self.root / "deck.yaml").write_text("sentinel: changed\n", encoding="utf-8")
+                adapter.release.set()
+
+                result = self.wait_for_terminal(service)
+
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.error, "AI実行中に現在案が変更されました。最新の内容から再試行してください。")
+        self.assertEqual(self.proposals, [])
+
+    def test_candidate_validation_is_followed_by_a_second_revision_check(self) -> None:
+        def analyze_then_change(**kwargs):
+            from bento_converter.html_change import analyze_html_change
+
+            impact = analyze_html_change(**kwargs)
+            canonical = self.root / "deck/current.html"
+            canonical.write_text(
+                canonical.read_text(encoding="utf-8").replace("Alpha details", "Changed during validation"),
+                encoding="utf-8",
+            )
+            return impact
+
+        service = AiProposalService(
+            self.root,
+            adapter=FakeAdapter(),
+            state_loader=lambda _root: copy.deepcopy(self.state),
+            propose=lambda *_args, **kwargs: self.proposals.append(kwargs),
+            analyze=analyze_then_change,
+        )
+
+        service.start(slide_id="s1", action="shorten", instruction="")
+        result = self.wait_for_terminal(service)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(self.proposals, [])
+
+    def test_sdk_adapter_uses_version_compatible_config_and_deny_all(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Config:
+            def __init__(self, **kwargs):
+                captured["config"] = kwargs
+
+        class Sandbox:
+            workspace_write = object()
+
+        class ApprovalMode:
+            deny_all = object()
+
+        class Thread:
+            async def run(self, _prompt, **kwargs):
+                captured["run"] = kwargs
+                return type("Result", (), {"error": None})()
+
+        class AsyncCodex:
+            def __init__(self, _config):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def account(self, **_kwargs):
+                return type("Account", (), {"account": object()})()
+
+            async def thread_start(self, **kwargs):
+                captured["thread_start"] = kwargs
+                return Thread()
+
+        adapter = CodexSdkAdapter()
+        adapter._imports = lambda: (AsyncCodex, Config, Sandbox, ApprovalMode)  # type: ignore[method-assign]
+
+        asyncio.run(adapter._generate(self.root, "fixture prompt"))
+
+        config = captured["config"]
+        self.assertIsInstance(config, dict)
+        overrides = config["config_overrides"]
+        self.assertNotIn("agents.enabled=false", overrides)
+        self.assertNotIn('approval_policy="never"', overrides)
+        self.assertIs(captured["thread_start"]["approval_mode"], ApprovalMode.deny_all)
+        self.assertIs(captured["run"]["approval_mode"], ApprovalMode.deny_all)
+
+    @unittest.skipUnless(importlib.util.find_spec("openai_codex"), "optional Codex SDK is not installed")
+    def test_installed_codex_sdk_contract_exposes_deny_all(self) -> None:
+        from openai_codex import Thread
+
+        adapter = CodexSdkAdapter()
+
+        async_codex, config_type, _sandbox, approval_mode = adapter._imports()
+        config = adapter._config(config_type, self.root)
+
+        self.assertTrue(hasattr(approval_mode, "deny_all"))
+        self.assertNotIn("agents.enabled=false", config.config_overrides)
+        self.assertIn("approval_mode", inspect.signature(async_codex.thread_start).parameters)
+        self.assertIn("approval_mode", inspect.signature(Thread.run).parameters)
 
     def test_add_diagram_accepts_native_source_derived_figure_and_rejects_bitmap(self) -> None:
         service = self.service("add-diagram")

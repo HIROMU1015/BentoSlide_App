@@ -1,2 +1,2 @@
 -r requirements.txt
-openai-codex
+openai-codex==0.144.4
