@@ -159,6 +159,49 @@ export type PlanningAiStatus = {
   proposalId: string | null
 }
 
+export type HtmlGenerationPhase =
+  | 'preparing'
+  | 'generating'
+  | 'validating'
+  | 'browser-checking'
+  | 'registering-candidate'
+  | 'ready'
+  | 'failed'
+
+export type HtmlGenerationCandidate = {
+  id: string
+  status: 'proposed'
+  summary: string
+  generatedSlideCount: number
+  sectionCount: number
+  visualsSummary: string
+  provenanceSummary: string
+  warnings: string[]
+  slides: Array<{
+    id: string
+    title: string
+    number: number
+    sectionId: string
+    sectionTitle: string
+  }>
+  candidateHtmlUrl: string
+  actionToken: string
+}
+
+export type HtmlGenerationStatus = {
+  available: boolean
+  reason: string | null
+  allowedStage: boolean
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  phase: HtmlGenerationPhase | null
+  message: string
+  error: string | null
+  retryable: boolean
+  hasCandidate: boolean
+  generationId: string | null
+  candidate: HtmlGenerationCandidate | null
+}
+
 export type PlanningSlideImpact = {
   id: string
   title: string

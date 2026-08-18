@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  applyPlanningAiProposal, cancelPlanningAiProposal, getAiStatus, getConversionStatus,
-  getLifecycleStatus, getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
+  applyHtmlGeneration, applyPlanningAiProposal, cancelHtmlGeneration, cancelPlanningAiProposal,
+  getAiStatus, getConversionStatus, getHtmlGenerationStatus, getLifecycleStatus,
+  getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal, startConversion,
+  startHtmlGeneration, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
 } from './client'
-import type { AppState, HtmlReview, Storyboard } from '../types'
+import type { AppState, HtmlGenerationStatus, HtmlReview, Storyboard } from '../types'
 
 const state: AppState = {
   mode: 'html-design',
@@ -149,6 +150,46 @@ describe('Planning AI proposal API client', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       5, `/api/ai/planning/proposals/${proposal.id}/cancel`, expect.objectContaining({
         method: 'POST', body: JSON.stringify({ confirmed: true, actionToken: proposal.actionToken }),
+      }),
+    )
+  })
+})
+
+describe('initial HTML generation API client', () => {
+  it('uses polling, start, apply, and cancel endpoints with opaque confirmation data', async () => {
+    const status: HtmlGenerationStatus = {
+      available: true, reason: null, allowedStage: false, status: 'succeeded', phase: 'ready',
+      message: '確認できます', error: null, retryable: false, hasCandidate: true,
+      generationId: 'b'.repeat(32),
+      candidate: {
+        id: 'b'.repeat(32), status: 'proposed', summary: '生成しました',
+        generatedSlideCount: 1, sectionCount: 1, visualsSummary: '図なし',
+        provenanceSummary: '一次資料のみ', warnings: [],
+        slides: [{ id: 's1', title: '背景', number: 1, sectionId: 'main', sectionTitle: 'Main' }],
+        candidateHtmlUrl: '/api/html/view/candidate/',
+        actionToken: 'opaque-html-generation-action-token',
+      },
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => status }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startHtmlGeneration('文字量を抑えて')
+    await getHtmlGenerationStatus()
+    await applyHtmlGeneration(status)
+    await cancelHtmlGeneration(status)
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/ai/html-generation', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ confirmed: true, instruction: '文字量を抑えて' }),
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/ai/html-generation/status', expect.anything())
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3, `/api/ai/html-generation/${status.candidate!.id}/apply`, expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ confirmed: true, actionToken: status.candidate!.actionToken }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4, `/api/ai/html-generation/${status.candidate!.id}/cancel`, expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ confirmed: true, actionToken: status.candidate!.actionToken }),
       }),
     )
   })

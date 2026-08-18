@@ -30,6 +30,10 @@ PlanningAiJobPhase = Literal[
     "preparing", "running-agent", "validating-candidate", "registering-proposal",
     "succeeded", "failed",
 ]
+HtmlGenerationPhase = Literal[
+    "preparing", "generating", "validating", "browser-checking",
+    "registering-candidate", "ready", "failed",
+]
 
 
 class ProjectInfo(BaseModel):
@@ -220,6 +224,56 @@ class PlanningProposalActionRequest(BaseModel):
 
     confirmed: Literal[True]
     actionToken: str = Field(min_length=20, max_length=256)
+
+
+class HtmlGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+    instruction: str = Field(default="", max_length=2000)
+
+
+class HtmlGenerationActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+    actionToken: str = Field(min_length=20, max_length=256)
+
+
+class HtmlGenerationSlide(BaseModel):
+    id: str
+    title: str
+    number: int = Field(ge=1)
+    sectionId: str
+    sectionTitle: str
+
+
+class HtmlGenerationCandidateView(BaseModel):
+    id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    status: Literal["proposed"]
+    summary: str
+    generatedSlideCount: int = Field(ge=1)
+    sectionCount: int = Field(ge=1)
+    visualsSummary: str
+    provenanceSummary: str
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+    slides: list[HtmlGenerationSlide] = Field(min_length=1, max_length=500)
+    candidateHtmlUrl: str
+    actionToken: str = Field(min_length=20, max_length=256)
+
+
+class HtmlGenerationStatusResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    allowedStage: bool
+    status: ConversionState
+    phase: HtmlGenerationPhase | None = None
+    message: str
+    error: str | None = None
+    retryable: bool = False
+    hasCandidate: bool = False
+    generationId: str | None = None
+    candidate: HtmlGenerationCandidateView | None = None
 
 
 class StoryboardDocumentSection(BaseModel):

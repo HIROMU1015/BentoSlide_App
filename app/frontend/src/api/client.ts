@@ -5,6 +5,7 @@ import type {
   BentoIntegration,
   ConversionStatus,
   HtmlReview,
+  HtmlGenerationStatus,
   HtmlView,
   LifecycleAction,
   LifecycleStatus,
@@ -36,6 +37,7 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
   storyboard?: Storyboard | null
   slideView: HtmlView
   bento: BentoIntegration
+  htmlGeneration?: HtmlGenerationStatus | null
 }> {
   const [project, state, bento] = await Promise.all([
     request<ProjectResponse>('/api/project'),
@@ -46,7 +48,15 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
   const review = state.mode === 'html-design' && state.htmlAvailable
     ? await request<HtmlReview>('/api/html/review')
     : null
-  const slideView = requestedView === 'candidate' && review?.candidateHtmlUrl ? 'candidate' : 'current'
+  const htmlGeneration = state.mode === 'html-design' && state.stage === 'html_authoring' && !state.htmlAvailable
+    ? await getHtmlGenerationStatus()
+    : null
+  const initialCandidate = htmlGeneration?.candidate ?? null
+  const slideView = requestedView === 'candidate' && (review?.candidateHtmlUrl || initialCandidate?.candidateHtmlUrl)
+    ? 'candidate'
+    : initialCandidate?.candidateHtmlUrl
+      ? 'candidate'
+      : 'current'
   const storyboardSlides: SlideItem[] = storyboard?.sections.flatMap((section) => section.slides.map((slide) => ({
     id: slide.id,
     title: slide.title,
@@ -55,10 +65,10 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
   }))) ?? []
   const slides = storyboard
     ? storyboardSlides
-    : state.htmlAvailable
+      : state.htmlAvailable || initialCandidate
       ? (await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)).slides
       : []
-  return { project, state, slides, review, storyboard, slideView, bento }
+  return { project, state, slides, review, storyboard, slideView, bento, htmlGeneration }
 }
 
 export function getStoryboard(view: 'current' | 'candidate' = 'current') {
@@ -143,6 +153,33 @@ export function cancelPlanningAiProposal(storyboard: Storyboard) {
   return request<Storyboard>(`/api/ai/planning/proposals/${storyboard.proposal.id}/cancel`, {
     method: 'POST',
     body: JSON.stringify({ confirmed: true, actionToken: storyboard.proposal.actionToken }),
+  })
+}
+
+export function getHtmlGenerationStatus() {
+  return request<HtmlGenerationStatus>('/api/ai/html-generation/status')
+}
+
+export function startHtmlGeneration(instruction = '') {
+  return request<HtmlGenerationStatus>('/api/ai/html-generation', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, instruction }),
+  })
+}
+
+export function applyHtmlGeneration(status: HtmlGenerationStatus) {
+  if (!status.candidate) throw new Error('確認できるHTML Candidateがありません')
+  return request<HtmlGenerationStatus>(`/api/ai/html-generation/${status.candidate.id}/apply`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, actionToken: status.candidate.actionToken }),
+  })
+}
+
+export function cancelHtmlGeneration(status: HtmlGenerationStatus) {
+  if (!status.candidate) throw new Error('確認できるHTML Candidateがありません')
+  return request<HtmlGenerationStatus>(`/api/ai/html-generation/${status.candidate.id}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, actionToken: status.candidate.actionToken }),
   })
 }
 

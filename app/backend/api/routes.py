@@ -17,6 +17,10 @@ from app.backend.models.view_models import (
     ConfirmedLifecycleRequest,
     ConversionStatusResponse,
     HtmlReviewResponse,
+    HtmlGenerationActionRequest,
+    HtmlGenerationCandidateView,
+    HtmlGenerationRequest,
+    HtmlGenerationStatusResponse,
     LifecycleStatusResponse,
     PlanningAiProposalRequest,
     PlanningAiStatusResponse,
@@ -34,6 +38,7 @@ from app.backend.services.ai_proposal_service import AiProposalService
 from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
+from app.backend.services.html_generation_service import HtmlGenerationService
 from app.backend.services.planning_ai_proposal_service import PlanningAiProposalService
 from app.backend.services.workflow_service import WorkflowService
 from app.backend.services.storyboard_service import StoryboardService
@@ -45,6 +50,7 @@ def create_api_router(
     lifecycle: BentoLifecycleService,
     ai: AiProposalService,
     planning_ai: PlanningAiProposalService,
+    html_generation: HtmlGenerationService,
     storyboard: StoryboardService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
@@ -89,6 +95,8 @@ def create_api_router(
     @router.get("/slides", response_model=SlidesResponse)
     def slides(view: Literal["current", "candidate"] = "current") -> SlidesResponse:
         try:
+            if view == "candidate" and html_generation.has_active_candidate():
+                return html_generation.slides()
             return workflow.slides(view=view)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=str(exc)) from exc
@@ -137,6 +145,44 @@ def create_api_router(
             slide_id=request.slideId,
             action=request.action,
             instruction=request.instruction,
+        )
+
+    @router.get("/ai/html-generation/status", response_model=HtmlGenerationStatusResponse)
+    def html_generation_status() -> HtmlGenerationStatusResponse:
+        return html_generation.status()
+
+    @router.post(
+        "/ai/html-generation",
+        response_model=HtmlGenerationStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def start_html_generation(request: HtmlGenerationRequest) -> HtmlGenerationStatusResponse:
+        return html_generation.start(instruction=request.instruction)
+
+    @router.get(
+        "/ai/html-generation/{generation_id}", response_model=HtmlGenerationCandidateView,
+    )
+    def html_generation_candidate(generation_id: str) -> HtmlGenerationCandidateView:
+        return html_generation.candidate(generation_id)
+
+    @router.post(
+        "/ai/html-generation/{generation_id}/apply", response_model=HtmlGenerationStatusResponse,
+    )
+    def apply_html_generation(
+        generation_id: str, request: HtmlGenerationActionRequest,
+    ) -> HtmlGenerationStatusResponse:
+        return html_generation.apply(
+            generation_id=generation_id, action_token=request.actionToken,
+        )
+
+    @router.post(
+        "/ai/html-generation/{generation_id}/cancel", response_model=HtmlGenerationStatusResponse,
+    )
+    def cancel_html_generation(
+        generation_id: str, request: HtmlGenerationActionRequest,
+    ) -> HtmlGenerationStatusResponse:
+        return html_generation.cancel(
+            generation_id=generation_id, action_token=request.actionToken,
         )
 
     @router.get("/ai/planning/status", response_model=PlanningAiStatusResponse)
@@ -222,7 +268,10 @@ def create_api_router(
 
     def html_file(view: str, resource_path: str) -> FileResponse:
         try:
-            path, media_type = html_review.resolve_view_resource(view, resource_path)
+            if view == "candidate" and html_generation.has_active_candidate():
+                path, media_type = html_generation.resolve_candidate_resource(resource_path)
+            else:
+                path, media_type = html_review.resolve_view_resource(view, resource_path)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="HTML view resource was not found") from exc
         return FileResponse(path, media_type=media_type, headers=safe_headers)

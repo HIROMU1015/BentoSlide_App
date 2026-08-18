@@ -1,6 +1,6 @@
 import type {
   AiProposalInput, AiStatus, AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
-  PlanningAiStatus,
+  HtmlGenerationStatus, PlanningAiStatus,
   ReviewMark, ReviewMarks, SlideItem, Storyboard, StoryboardAction, StoryboardSlide,
 } from '../types'
 import { BentoLifecyclePanel } from './BentoLifecyclePanel'
@@ -8,6 +8,7 @@ import { ConversionPanel } from './ConversionPanel'
 import { HtmlReviewPanel } from './HtmlReviewPanel'
 import { AiActionsPanel } from './AiActionsPanel'
 import { StoryboardInspector } from './StoryboardInspector'
+import { HtmlGenerationPanel } from './HtmlGenerationPanel'
 
 type Props = {
   state: AppState
@@ -20,6 +21,7 @@ type Props = {
   lifecycle: LifecycleStatus | null
   ai: AiStatus | null
   planningAi: PlanningAiStatus | null
+  htmlGeneration: HtmlGenerationStatus | null
   storyboard: Storyboard | null
   selectedStoryboardSlide: StoryboardSlide | null
   onSelectSlide: (slideId: string) => void
@@ -37,6 +39,11 @@ type Props = {
   onRetryPlanningAi: (instruction: string) => void
   onApplyPlanningAi: () => void
   onCancelPlanningAi: () => void
+  onStartHtmlGeneration: (instruction: string) => void
+  onRetryHtmlGeneration: (instruction: string) => void
+  onRegenerateHtml: (instruction: string) => void
+  onApplyHtmlGeneration: () => void
+  onCancelHtmlGeneration: () => void
 }
 
 export function Inspector(props: Props) {
@@ -64,6 +71,18 @@ export function Inspector(props: Props) {
         <strong>{selected ? `${String(selected.number).padStart(2, '0')} ${selected.title}` : 'スライド未選択'}</strong>
         <small>{selectedElement ? `要素: ${selectedElement}` : 'スライド全体'}</small>
       </section>
+
+      {state.mode === 'html-design' && !state.htmlAvailable && (
+        <HtmlGenerationPanel
+          status={props.htmlGeneration}
+          disabled={props.busy}
+          onStart={props.onStartHtmlGeneration}
+          onRetry={props.onRetryHtmlGeneration}
+          onRegenerate={props.onRegenerateHtml}
+          onApply={props.onApplyHtmlGeneration}
+          onCancel={props.onCancelHtmlGeneration}
+        />
+      )}
 
       {state.mode === 'html-design' && review && (
         <HtmlReviewPanel {...props} review={review} selectedSlide={selected?.id ?? null} />

@@ -2680,6 +2680,251 @@ def command_complete_html_deck(root: Path, state: dict[str, Any]) -> None:
     append_work_log(root, "Validated the complete HTML deck and opened one whole-deck review")
 
 
+def command_apply_initial_html_candidate(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    candidate_html: Path,
+    candidate_registry: Path,
+    expected_base_planning_signature: str,
+    expected_state_revision: str,
+    expected_input_revisions: Mapping[str, str | None],
+    expected_candidate_html_revision: str,
+    expected_candidate_registry_revision: str,
+    expected_candidate_review_digest: str,
+    candidate_dependency_revisions: Mapping[str, str],
+    expected_evidence_revisions: Mapping[str, str],
+    proposal_path: Path,
+    expected_proposal_revision: str,
+    applied_proposal_payload: bytes,
+    proposal_digest: str,
+    fault_injector: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Atomically install one reviewed initial HTML/registry pair and open HTML review."""
+
+    root = root.resolve()
+    source_html = candidate_html.resolve()
+    source_registry = candidate_registry.resolve()
+    marker = proposal_path.resolve()
+    for path, label in (
+        (source_html, "HTML Candidate"),
+        (source_registry, "HTML Candidate registry"),
+        (marker, "HTML Candidate metadata"),
+    ):
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise WorkflowError(f"{label} must remain inside the repository") from exc
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowError(f"{label} is missing or unsafe")
+        parts = relative.parts
+        if len(parts) < 4 or parts[0] != ".bento-ai" or parts[1] != "runs" or not re.fullmatch(r"[0-9a-f]{32}", parts[2]):
+            raise WorkflowError(f"{label} is not generation-scoped")
+    job_id = marker.relative_to(root).parts[2]
+    expected_directory = root / ".bento-ai" / "runs" / job_id
+    if source_html != expected_directory / "candidate" / "deck.preview.html":
+        raise WorkflowError("HTML Candidate location is invalid")
+    if source_registry != expected_directory / "candidate" / "deck.registry.json":
+        raise WorkflowError("HTML Candidate registry location is invalid")
+    if marker != expected_directory / "html-generation.json":
+        raise WorkflowError("HTML Candidate metadata location is invalid")
+    try:
+        applied_value = json.loads(applied_proposal_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError("Applied HTML Candidate metadata is invalid") from exc
+    if (
+        not isinstance(applied_value, dict)
+        or applied_value.get("status") != "applied"
+        or applied_value.get("candidateDigest") != proposal_digest
+        or applied_value.get("generationId") != job_id
+    ):
+        raise WorkflowError("Applied HTML Candidate metadata does not match the reviewed candidate")
+
+    canonical_html = _repo_path(root, state["authoring"]["entryHtml"], field="authoring.entryHtml")
+    canonical_registry = _repo_path(root, state["authoring"]["registry"], field="authoring.registry")
+    deck_path = (root / STATE_RELATIVE).resolve()
+    work_log = (root / WORK_LOG_RELATIVE).resolve()
+    input_paths = {
+        _repo_path(root, relative, field="HTML generation input"): revision
+        for relative, revision in expected_input_revisions.items()
+    }
+    dependency_paths = {
+        _repo_path(root, relative, field="HTML Candidate dependency"): revision
+        for relative, revision in candidate_dependency_revisions.items()
+    }
+    evidence_paths = {
+        _repo_path(root, relative, field="HTML Candidate browser evidence"): revision
+        for relative, revision in expected_evidence_revisions.items()
+    }
+    lease_paths = {
+        *planning_action_artifact_paths(root, state),
+        canonical_html,
+        canonical_registry,
+        source_html,
+        source_registry,
+        marker,
+        *input_paths,
+        *dependency_paths,
+        *evidence_paths,
+    }
+    lease = WriterLease(root, lease_paths)
+    try:
+        lease.acquire()
+        with planning_action_guard(root, state, inherited_writer_lease=lease):
+            _require_stage(state, "html_authoring")
+            if (
+                state.get("schemaVersion") != 2
+                or state.get("authoring", {}).get("mode") not in {"single", "imported"}
+                or _authoring_strategy(state) != WHOLE_DECK_STRATEGY
+            ):
+                raise WorkflowError("Initial HTML Candidate requires schema v2 whole-deck authoring")
+            if any(state.get("approvals", {}).get(key) != "approved" for key in (
+                "explanationPolicy", "storyOutline", "slidePlan",
+            )):
+                raise WorkflowError("Initial HTML Candidate requires approved planning")
+            if _has_active_html_change(state):
+                raise WorkflowError("Resolve the active HTML change before applying initial HTML")
+            if canonical_html.exists() or canonical_registry.exists():
+                raise PlanningRevisionConflict(
+                    "Canonical HTMLまたはregistryがすでに存在します。既存のHTML Review経路を利用してください。"
+                )
+            if file_revision(deck_path) != expected_state_revision:
+                raise PlanningRevisionConflict("deck.yamlが更新されています。HTML案を作り直してください。")
+            if not hmac.compare_digest(
+                planning_review_signature(root, state), expected_base_planning_signature,
+            ):
+                raise PlanningRevisionConflict("承認済みplanningが更新されています。HTML案を作り直してください。")
+            if file_revision(source_html) != expected_candidate_html_revision:
+                raise PlanningRevisionConflict("HTML Candidateが更新されています。最新の案を読み直してください。")
+            if file_revision(source_registry) != expected_candidate_registry_revision:
+                raise PlanningRevisionConflict("HTML Candidate registryが更新されています。最新の案を読み直してください。")
+            if file_revision(marker) != expected_proposal_revision:
+                raise PlanningRevisionConflict("HTML Candidate metadataが更新されています。最新の案を読み直してください。")
+            for path, revision in {**input_paths, **dependency_paths, **evidence_paths}.items():
+                if file_revision(path) != revision:
+                    raise PlanningRevisionConflict("HTML Candidateの入力またはdependencyが更新されています。HTML案を作り直してください。")
+
+            html_payload = source_html.read_bytes()
+            registry_payload = source_registry.read_bytes()
+            candidate_registry_value = _read_json(source_registry, label="initial HTML Candidate registry")
+
+            def installed_evidence() -> HtmlDeckStructureEvidence:
+                canonical_html.parent.mkdir(parents=True, exist_ok=True)
+                handle = tempfile.NamedTemporaryFile(
+                    prefix=".initial-html-", suffix=".preview.html",
+                    dir=canonical_html.parent, delete=False,
+                )
+                temporary = Path(handle.name)
+                try:
+                    with handle:
+                        handle.write(html_payload)
+                    return _whole_deck_evidence(
+                        root, state, html_path=temporary, registry=candidate_registry_value,
+                    )
+                finally:
+                    temporary.unlink(missing_ok=True)
+
+            evidence = installed_evidence()
+            if evidence.review_digest != expected_candidate_review_digest:
+                raise PlanningRevisionConflict("HTML Candidateのreview evidenceが更新されています。")
+            if evidence.dependency_hashes != dict(candidate_dependency_revisions):
+                raise PlanningRevisionConflict("HTML Candidateのdependency manifestが更新されています。")
+            expected_slide_ids = [
+                slide_id
+                for section in state["sections"].values()
+                for slide_id in section.get("slideIds", [])
+            ]
+            expected_sections = {
+                slide_id: section_id
+                for section_id, section in state["sections"].items()
+                for slide_id in section.get("slideIds", [])
+            }
+            if list(evidence.ordered_slide_ids) != expected_slide_ids:
+                raise WorkflowError("HTML Candidate slide order differs from approved planning")
+            if evidence.slide_section_ids != expected_sections:
+                raise WorkflowError("HTML Candidate section membership differs from approved planning")
+
+            next_state = copy.deepcopy(state)
+            next_state["authoring"]["htmlChange"] = None
+            _set_whole_deck_html_review(
+                root,
+                next_state,
+                evidence,
+                source="completed-authoring",
+                proposal_digest=proposal_digest,
+                html_revision=expected_candidate_html_revision,
+                registry_revision_value=expected_candidate_registry_revision,
+            )
+            validate_state(root, next_state)
+            payloads = {
+                canonical_html: html_payload,
+                canonical_registry: registry_payload,
+                deck_path: _state_payload(next_state),
+                work_log: _work_log_payload(
+                    root,
+                    "Applied the reviewed AI initial HTML Candidate and opened whole-deck HTML review",
+                ),
+                marker: bytes(applied_proposal_payload),
+            }
+            store = ArtifactTransactionStore(
+                root,
+                (*payloads, source_html, source_registry, *input_paths, *dependency_paths, *evidence_paths),
+                inherited_writer_lease=lease,
+                fault_injector=fault_injector,
+            )
+
+            def validate_base() -> None:
+                fresh = load_state(root)
+                if file_revision(deck_path) != expected_state_revision:
+                    raise PlanningRevisionConflict("deck.yaml changed while applying initial HTML")
+                if not hmac.compare_digest(
+                    planning_review_signature(root, fresh), expected_base_planning_signature,
+                ):
+                    raise PlanningRevisionConflict("approved planning changed while applying initial HTML")
+                if canonical_html.exists() or canonical_registry.exists():
+                    raise PlanningRevisionConflict("canonical HTML appeared while applying initial HTML")
+                if file_revision(source_html) != expected_candidate_html_revision:
+                    raise PlanningRevisionConflict("HTML Candidate changed while applying")
+                if file_revision(source_registry) != expected_candidate_registry_revision:
+                    raise PlanningRevisionConflict("HTML Candidate registry changed while applying")
+                if file_revision(marker) != expected_proposal_revision:
+                    raise PlanningRevisionConflict("HTML Candidate metadata changed while applying")
+                for path, revision in {**input_paths, **dependency_paths, **evidence_paths}.items():
+                    if file_revision(path) != revision:
+                        raise PlanningRevisionConflict("HTML Candidate input changed while applying")
+                current_evidence = installed_evidence()
+                if current_evidence.review_digest != expected_candidate_review_digest:
+                    raise PlanningRevisionConflict("HTML Candidate evidence changed while applying")
+
+            def validate_committed() -> None:
+                committed = load_state(root)
+                if committed["workflow"]["stage"] != "html_review":
+                    raise WorkflowError("Initial HTML apply did not open HTML review")
+                if file_revision(canonical_html) != expected_candidate_html_revision:
+                    raise WorkflowError("Installed canonical HTML differs from the reviewed candidate")
+                if file_revision(canonical_registry) != expected_candidate_registry_revision:
+                    raise WorkflowError("Installed canonical registry differs from the reviewed candidate")
+                _require_current_html_review(root, committed)
+                if marker.read_bytes() != applied_proposal_payload:
+                    raise WorkflowError("Applied HTML Candidate status differs after commit")
+
+            result = store.commit(
+                payloads,
+                operation="apply-ai-initial-html-candidate",
+                validate_base=validate_base,
+                validate_committed=validate_committed,
+            )
+            state.clear()
+            state.update(next_state)
+            return result
+    except ArtifactLeaseConflict as exc:
+        raise PlanningRevisionConflict(
+            "HTML案の反映対象を別の処理が更新中です。完了後に最新の案を読み直してください。"
+        ) from exc
+    finally:
+        lease.release()
+
+
 def command_approve_html_deck(root: Path, state: dict[str, Any]) -> None:
     _require_stage(state, "html_review")
     if _authoring_strategy(state) != WHOLE_DECK_STRATEGY:

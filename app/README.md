@@ -60,6 +60,11 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 - `GET /api/ai/planning/proposals/{proposal}`: 人が読むsummary、impact、process-local action tokenだけを返します。
 - `POST /api/ai/planning/proposals/{proposal}/apply`: 明示確認後、固定されたCandidate全体を既存WriterLeaseとtransaction経路でcanonical planningへ反映します。
 - `POST /api/ai/planning/proposals/{proposal}/cancel`: Candidateを破棄し、canonical planningは変更しません。
+- `GET /api/ai/html-generation/status`: 初期HTML生成の利用可否、実処理段階、失敗理由、再試行可否、未解決Candidateの概要を返します。
+- `POST /api/ai/html-generation`: `{ "confirmed": true, "instruction": "..." }`を受け、承認済みplanningから確認用HTML／registryを1件だけ生成します。
+- `GET /api/ai/html-generation/{generation}`: slide／section数、Visual・出典の要約、警告、opaque action tokenだけを返します。
+- `POST /api/ai/html-generation/{generation}/apply`: 明示確認後、固定されたHTML／registry Candidateとブラウザ証拠を既存WriterLeaseとtransaction経路でcanonicalへ反映し、HTML全体の確認を開始します。
+- `POST /api/ai/html-generation/{generation}/cancel`: Candidateを破棄し、canonical HTML／registryとworkflow stateは変更しません。
 
 5つのBento lifecycle POSTはすべて`{ "confirmed": true }`のみを受け付け、`202 Accepted`でバックグラウンド処理を開始します。既知のstage不一致、重複実行、検証できないeditor sessionは`409 Conflict`で拒否します。処理中はAppがstatusを定期取得し、実際の段階と完了数を表示します。
 
@@ -82,7 +87,7 @@ awaiting_plan_approval
 
 各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenは`deck.yaml`、表示対象の各planning文書、visual plan、section／chapterの順序と状態を、path・有無・byte長・個別SHA-256を持つcanonical recordへ固定したprocess-local値です。提出・承認だけでなく、request、project metadata、section／chapter設定、planning文書の組み込みwriterも同じartifact群のOSレベルwriter leaseを取得します。画面表示後または遷移直前に内容が変わった場合や別processが更新中の場合は`409 Conflict`として`deck.yaml`を変更しません。必要な文書とsection／chapterが揃うまでは提出・承認操作を表示しません。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。Codexなどのオフラインwriterは、固定された4種類だけを扱う`write-planning-artifact`経路を使用します。
 
-承認直後の`html_authoring`でHTMLがまだ存在しない間は「HTMLを準備しています」と表示します。この状態ではHTML review、slide preview、AI Actionsを要求しません。HTMLデザインが既存経路で作成された後に「状態を更新」すると、通常のHTML Design確認へ切り替わります。
+承認直後の`html_authoring`でHTMLがまだ存在しない間は、AI HTML Initial Generationが利用可能なら生成パネルを表示します。利用できない場合は「HTMLを準備しています」と表示します。この状態では既存HTML reviewや既存HTML修正用AI Actionsを要求しません。Candidateを明示的に採用するか、HTMLデザインが既存経路で作成された後に状態を更新すると、通常のHTML Design確認へ切り替わります。
 
 ### AI Planning Proposal
 
@@ -101,6 +106,14 @@ sections + stable slideIds
 生成後は中央Canvasの`Current`／`Candidate`を切り替え、追加・削除・変更・移動したslide、section変更、説明方針・ストーリー・visual planの影響を確認します。生成だけではcanonical、submit、approve、HTML生成を一切実行しません。「この変更案を反映」を明示した場合だけ、生成元のplanning／request／project state／primary source revision、Candidate signature、Proposal metadataとprocess-local tokenを再確認します。staleまたはtamperedなProposalは`409 Conflict`で拒否します。
 
 Applyは`deck.yaml`、4つのplanning artifact、section／slideIds、work log、Proposal状態を同じcross-process WriterLease下の1 transactionで更新します。途中失敗は全targetをrollbackします。Apply後もstageは`planning`のままで、既存の「構成案を提出」および「この構成を承認」は別の人間操作です。Backend再起動後も登録済みCandidateは再表示でき、実行中に中断されたjobは再試行可能な失敗として復旧します。
+
+### AI HTML Initial Generation
+
+schema v2の`single`／`imported`、`whole_deck`方式でplanning承認直後の`html_authoring`にあり、canonical HTML／registryがまだ存在しない場合だけ利用できます。AIは承認済みplanning snapshotを構造契約として、request、project metadata、許可されたprimary／evidence／supplementary source、必要な仕様を`.bento-ai/runs/<job>/`へコピーし、その隔離領域だけで完全なHTML／registry Candidateを作ります。任意のリポジトリ探索、ネットワーク、script、画像生成は許可しません。
+
+Candidate登録前に、section・slide ID・順序・枚数の完全一致、visual planとの明示対応、source／registry／provenance、重複element ID、外部参照、入力改変、新しい事実・数値を検証します。さらに既存のブラウザ検証経路で全スライドの1280×720表示、visible bounds、文字overflowを確認し、revision-boundなreport、environment、screenshot証拠を保存します。架空の進捗率は返さず、準備、生成、検証、ブラウザ確認、Candidate登録という実際の段階だけを表示します。
+
+生成とプレビューだけではcanonical HTML／registry、`deck.yaml`、submit、approve、conversionを変更しません。「このHTML案を採用」を明示した場合だけ、process-local action token、承認済みplanning、request／project／source／spec revision、Candidate、dependency、ブラウザ証拠を同じunion WriterLease内で再検証します。合格した完全なHTML／registryと`deck.yaml`、work log、Candidate状態を1 transactionで反映し、既存の`html_review`へ進めます。stale、tampered、同時writer、途中失敗はcanonicalを変更せず拒否します。破棄と再生成も明示操作で、Backend再起動時は登録済みCandidateを再表示し、中断された実行は再試行可能な失敗として復旧します。
 
 ## App内のBento承認フロー
 

@@ -18,6 +18,7 @@ from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.ai_proposal_service import AiProposalService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
+from app.backend.services.html_generation_service import HtmlGenerationService
 from app.backend.services.planning_ai_proposal_service import PlanningAiProposalService
 from app.backend.services.workflow_service import WorkflowService
 from app.backend.services.storyboard_service import StoryboardService
@@ -31,6 +32,7 @@ def create_app(
     lifecycle_service: BentoLifecycleService | None = None,
     ai_service: AiProposalService | None = None,
     planning_ai_service: PlanningAiProposalService | None = None,
+    html_generation_service: HtmlGenerationService | None = None,
     storyboard_service: StoryboardService | None = None,
 ) -> FastAPI:
     root = repository_root(repository or Path(__file__).resolve().parents[2])
@@ -42,6 +44,7 @@ def create_app(
     lifecycle = lifecycle_service or BentoLifecycleService(root)
     ai = ai_service or AiProposalService(root)
     planning_ai = planning_ai_service or PlanningAiProposalService(root)
+    html_generation = html_generation_service or HtmlGenerationService(root)
     storyboard = storyboard_service or StoryboardService(root)
 
     application = FastAPI(title="BentoSlide Application API", version="0.1.0")
@@ -53,6 +56,7 @@ def create_app(
     application.state.lifecycle_service = lifecycle
     application.state.ai_service = ai
     application.state.planning_ai_service = planning_ai
+    application.state.html_generation_service = html_generation
     application.state.storyboard_service = storyboard
 
     @application.exception_handler(WorkflowError)
@@ -76,6 +80,7 @@ def create_app(
         lifecycle=lifecycle,
         ai=ai,
         planning_ai=planning_ai,
+        html_generation=html_generation,
         storyboard=storyboard,
     ))
 

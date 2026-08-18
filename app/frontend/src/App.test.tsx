@@ -2,13 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import {
-  applyPlanningAiProposal, cancelPlanningAiProposal, getAiStatus, getConversionStatus,
-  getLifecycleStatus, getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
+  applyHtmlGeneration, applyPlanningAiProposal, cancelHtmlGeneration, cancelPlanningAiProposal,
+  getAiStatus, getConversionStatus, getHtmlGenerationStatus, getLifecycleStatus,
+  getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal, startConversion,
+  startHtmlGeneration, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
 } from './api/client'
 import type {
   AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus,
-  PlanningAiStatus, Storyboard,
+  HtmlGenerationStatus, PlanningAiStatus, Storyboard,
 } from './types'
 
 function deferred<T>() {
@@ -26,16 +27,20 @@ vi.mock('./api/client', () => ({
   approveHtmlDeck: vi.fn(),
   applyPlanningAiProposal: vi.fn(),
   cancelPlanningAiProposal: vi.fn(),
+  applyHtmlGeneration: vi.fn(),
+  cancelHtmlGeneration: vi.fn(),
   getConversionStatus: vi.fn(),
   getAiStatus: vi.fn(),
   getLifecycleStatus: vi.fn(),
   getPlanningAiStatus: vi.fn(),
+  getHtmlGenerationStatus: vi.fn(),
   getStoryboard: vi.fn(),
   loadAppData: vi.fn(),
   startConversion: vi.fn(),
   startAiProposal: vi.fn(),
   startLifecycleAction: vi.fn(),
   startPlanningAiProposal: vi.fn(),
+  startHtmlGeneration: vi.fn(),
   startStoryboardAction: vi.fn(),
 }))
 
@@ -68,6 +73,12 @@ const idlePlanningAi: PlanningAiStatus = {
   hasProposal: false, proposalId: null,
 }
 
+const idleHtmlGeneration: HtmlGenerationStatus = {
+  available: true, reason: null, allowedStage: true, status: 'idle', phase: null,
+  message: '承認済み構成からHTML案を生成できます。', error: null, retryable: false,
+  hasCandidate: false, generationId: null, candidate: null,
+}
+
 const appState: AppState = {
   mode: 'html-design',
   stage: 'html_review',
@@ -96,6 +107,7 @@ beforeEach(() => {
   vi.mocked(getLifecycleStatus).mockResolvedValue(idleLifecycle)
   vi.mocked(getAiStatus).mockResolvedValue(idleAi)
   vi.mocked(getPlanningAiStatus).mockResolvedValue(idlePlanningAi)
+  vi.mocked(getHtmlGenerationStatus).mockResolvedValue(idleHtmlGeneration)
   vi.mocked(getStoryboard).mockRejectedValue(new Error('Storyboard view is not configured in this test'))
   vi.mocked(startConversion).mockResolvedValue({
     ...idleConversion,
@@ -113,6 +125,11 @@ beforeEach(() => {
   vi.mocked(startPlanningAiProposal).mockResolvedValue({
     ...idlePlanningAi, status: 'running', phase: 'preparing', message: '準備中',
   })
+  vi.mocked(startHtmlGeneration).mockResolvedValue({
+    ...idleHtmlGeneration, status: 'running', phase: 'preparing', message: '準備中',
+  })
+  vi.mocked(applyHtmlGeneration).mockResolvedValue({ ...idleHtmlGeneration, status: 'succeeded', phase: 'ready' })
+  vi.mocked(cancelHtmlGeneration).mockResolvedValue(idleHtmlGeneration)
   vi.mocked(applyPlanningAiProposal).mockResolvedValue({} as Storyboard)
   vi.mocked(cancelPlanningAiProposal).mockResolvedValue({} as Storyboard)
   vi.mocked(loadAppData).mockImplementation(async (view: HtmlView = 'current') => ({
@@ -414,6 +431,163 @@ describe('App Planning AI proposal workflow', () => {
 
     await waitFor(() => expect(cancelPlanningAiProposal).toHaveBeenCalledWith(proposedCurrent))
     expect(applyPlanningAiProposal).not.toHaveBeenCalled()
+  })
+})
+
+describe('App initial HTML generation workflow', () => {
+  const generationState: AppState = {
+    ...appState,
+    mode: 'html-design',
+    stage: 'html_authoring',
+    htmlAvailable: false,
+    hasCandidate: false,
+  }
+  const candidate = {
+    id: 'b'.repeat(32),
+    status: 'proposed' as const,
+    summary: '承認済み構成から2枚のHTML案を生成しました。',
+    generatedSlideCount: 2,
+    sectionCount: 2,
+    visualsSummary: '図は必要な箇所だけに限定しました。',
+    provenanceSummary: '許可された一次資料だけを使用しました。',
+    warnings: ['画像生成は行っていません。'],
+    slides: [
+      { id: 's1', title: '背景', number: 1, sectionId: 'intro', sectionTitle: '導入' },
+      { id: 's2', title: '方法', number: 2, sectionId: 'method', sectionTitle: '方法' },
+    ],
+    candidateHtmlUrl: '/api/html/view/candidate/',
+    actionToken: 'opaque-html-generation-action-token',
+  }
+  const readyGeneration: HtmlGenerationStatus = {
+    ...idleHtmlGeneration,
+    allowedStage: false,
+    status: 'succeeded',
+    phase: 'ready',
+    message: '生成されたHTML案を確認できます。',
+    hasCandidate: true,
+    generationId: candidate.id,
+    candidate,
+  }
+
+  function generationData(status: HtmlGenerationStatus) {
+    return {
+      project: { project: { title: 'HTML Generation Fixture', kind: 'fixture' } },
+      state: generationState,
+      review: null,
+      htmlGeneration: status,
+      bento: { available: false, editorUrl: null, message: '準備中' },
+      slideView: status.candidate ? 'candidate' as const : 'current' as const,
+      slides: status.candidate
+        ? status.candidate.slides.map((slide) => ({
+          id: slide.id, title: slide.title, number: slide.number, sectionTitle: slide.sectionTitle,
+        }))
+        : [],
+    }
+  }
+
+  it('shows the generation entry point and starts only after explicit confirmation', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(generationData(idleHtmlGeneration))
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(idleHtmlGeneration)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'HTML案を生成' }))
+
+    await waitFor(() => expect(startHtmlGeneration).toHaveBeenCalledWith(''))
+    expect(window.confirm).toHaveBeenCalledWith('承認済み構成から確認用のHTML案をAIで生成しますか？')
+  })
+
+  it('shows the actual running phase and retryable failure', async () => {
+    const running: HtmlGenerationStatus = {
+      ...idleHtmlGeneration,
+      status: 'running', phase: 'browser-checking', allowedStage: true,
+      message: 'ブラウザで全スライドの表示を確認しています。',
+    }
+    vi.mocked(loadAppData).mockResolvedValue(generationData(running))
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(running)
+    const { unmount } = render(<App />)
+    expect(await screen.findByText('ブラウザ表示を確認中')).toBeInTheDocument()
+    expect(screen.getByText('ブラウザで全スライドの表示を確認しています。')).toBeInTheDocument()
+    unmount()
+
+    const failed: HtmlGenerationStatus = {
+      ...idleHtmlGeneration,
+      status: 'failed', phase: 'failed', retryable: true,
+      message: 'HTML案を検証できませんでした。', error: 'slide IDが構成と一致しません。',
+    }
+    vi.mocked(loadAppData).mockResolvedValue(generationData(failed))
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(failed)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('slide IDが構成と一致しません。')
+    fireEvent.click(screen.getByRole('button', { name: '現在の指示で再試行' }))
+    await waitFor(() => expect(startHtmlGeneration).toHaveBeenCalled())
+  })
+
+  it('reviews result metadata and applies the exact candidate into existing HTML review', async () => {
+    const reviewedState = { ...appState, hasCandidate: false }
+    vi.mocked(loadAppData)
+      .mockResolvedValueOnce(generationData(readyGeneration))
+      .mockResolvedValue({
+        project: { project: { title: 'HTML Generation Fixture', kind: 'fixture' } },
+        state: reviewedState,
+        review,
+        htmlGeneration: null,
+        bento: { available: false, editorUrl: null, message: '準備中' },
+        slideView: 'current',
+        slides: [{ id: 's1', title: '背景', number: 1, sectionTitle: '導入' }],
+      })
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(readyGeneration)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    expect(await screen.findByText(candidate.summary)).toBeInTheDocument()
+    expect(screen.getByText('2枚')).toBeInTheDocument()
+    expect(screen.getByTitle('生成されたHTML案のプレビュー')).toHaveAttribute('src', candidate.candidateHtmlUrl)
+    fireEvent.click(screen.getByRole('button', { name: 'このHTML案を採用' }))
+
+    await waitFor(() => expect(applyHtmlGeneration).toHaveBeenCalledWith(readyGeneration))
+    expect(window.confirm).toHaveBeenCalledWith(
+      'このHTML案をcanonical HTMLとして採用し、HTML全体の確認へ進みますか？',
+    )
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+  })
+
+  it('cancels without applying the candidate', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(generationData(readyGeneration))
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(readyGeneration)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'このHTML案を破棄' }))
+    await waitFor(() => expect(cancelHtmlGeneration).toHaveBeenCalledWith(readyGeneration))
+    expect(applyHtmlGeneration).not.toHaveBeenCalled()
+  })
+
+  it('regenerates only after cancelling the reviewed candidate', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(generationData(readyGeneration))
+    vi.mocked(getHtmlGenerationStatus).mockResolvedValue(readyGeneration)
+    const order: string[] = []
+    vi.mocked(cancelHtmlGeneration).mockImplementation(async () => {
+      order.push('cancel')
+      return idleHtmlGeneration
+    })
+    vi.mocked(startHtmlGeneration).mockImplementation(async () => {
+      order.push('start')
+      return { ...idleHtmlGeneration, status: 'running', phase: 'preparing' }
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '再生成' }))
+
+    await waitFor(() => expect(startHtmlGeneration).toHaveBeenCalledWith(''))
+    expect(cancelHtmlGeneration).toHaveBeenCalledWith(readyGeneration)
+    expect(order).toEqual(['cancel', 'start'])
+    expect(applyHtmlGeneration).not.toHaveBeenCalled()
+    expect(window.confirm).toHaveBeenCalledWith(
+      '現在のHTML案を破棄し、承認済み構成から再生成しますか？',
+    )
   })
 })
 

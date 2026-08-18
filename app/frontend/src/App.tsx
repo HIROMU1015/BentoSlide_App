@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyHtmlChange,
+  applyHtmlGeneration,
   applyPlanningAiProposal,
   approveHtmlDeck,
   cancelPlanningAiProposal,
+  cancelHtmlGeneration,
   getConversionStatus,
   getAiStatus,
   getLifecycleStatus,
   getPlanningAiStatus,
+  getHtmlGenerationStatus,
   getStoryboard,
   loadAppData,
   startConversion,
   startAiProposal,
   startLifecycleAction,
   startPlanningAiProposal,
+  startHtmlGeneration,
   startStoryboardAction,
 } from './api/client'
 import { Inspector } from './components/Inspector'
@@ -27,6 +31,7 @@ import type {
   AiStatus,
   BentoIntegration,
   ConversionStatus,
+  HtmlGenerationStatus,
   HtmlReview,
   HtmlView,
   LifecycleAction,
@@ -63,6 +68,7 @@ export default function App() {
   const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null)
   const [ai, setAi] = useState<AiStatus | null>(null)
   const [planningAi, setPlanningAi] = useState<PlanningAiStatus | null>(null)
+  const [htmlGeneration, setHtmlGeneration] = useState<HtmlGenerationStatus | null>(null)
   const [selectedSlide, setSelectedSlide] = useState<string | null>(null)
   const [selectedElement] = useState<string | null>(null)
   const [currentMode, setCurrentMode] = useState<AppState['mode'] | null>(null)
@@ -73,10 +79,12 @@ export default function App() {
   const [lifecycleRequestBusy, setLifecycleRequestBusy] = useState(false)
   const [aiRequestBusy, setAiRequestBusy] = useState(false)
   const [planningAiRequestBusy, setPlanningAiRequestBusy] = useState(false)
+  const [htmlGenerationRequestBusy, setHtmlGenerationRequestBusy] = useState(false)
   const [conversionSettling, setConversionSettling] = useState(false)
   const [lifecycleSettling, setLifecycleSettling] = useState(false)
   const [aiSettling, setAiSettling] = useState(false)
   const [planningAiSettling, setPlanningAiSettling] = useState(false)
+  const [htmlGenerationSettling, setHtmlGenerationSettling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const mounted = useRef(true)
@@ -86,10 +94,12 @@ export default function App() {
   const lifecycleGeneration = useRef(0)
   const aiGeneration = useRef(0)
   const planningAiGeneration = useRef(0)
+  const htmlGenerationSequence = useRef(0)
   const conversionTimer = useRef<number | null>(null)
   const lifecycleTimer = useRef<number | null>(null)
   const aiTimer = useRef<number | null>(null)
   const planningAiTimer = useRef<number | null>(null)
+  const htmlGenerationTimer = useRef<number | null>(null)
 
   const refresh = useCallback(async (requestedView?: HtmlView) => {
     try {
@@ -115,6 +125,7 @@ export default function App() {
       setReview(data.review)
       setStoryboard(data.storyboard ?? null)
       setBento(data.bento)
+      setHtmlGeneration(data.htmlGeneration ?? null)
       setCurrentMode(data.state.mode)
       setCurrentProposal(data.review?.proposal ?? null)
       setError(null)
@@ -313,6 +324,47 @@ export default function App() {
     void accept(initial)
   }, [chooseStoryboardView, refresh])
 
+  const trackHtmlGeneration = useCallback((initial: HtmlGenerationStatus) => {
+    const sequence = ++htmlGenerationSequence.current
+    if (htmlGenerationTimer.current !== null) window.clearTimeout(htmlGenerationTimer.current)
+
+    const accept = async (result: HtmlGenerationStatus) => {
+      if (!mounted.current || sequence !== htmlGenerationSequence.current) return
+      if (result.status === 'running') {
+        setHtmlGenerationSettling(false)
+        setHtmlGeneration(result)
+        htmlGenerationTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+        return
+      }
+      setHtmlGenerationSettling(true)
+      setHtmlGeneration(result)
+      const refreshed = await refresh(result.hasCandidate ? 'candidate' : undefined)
+      if (!mounted.current || sequence !== htmlGenerationSequence.current) return
+      if (!refreshed) {
+        htmlGenerationTimer.current = window.setTimeout(() => void accept(result), POLL_DELAY_MS)
+        return
+      }
+      if (result.status === 'succeeded' && result.hasCandidate) {
+        setNotice('AIがHTML Candidateを生成しました。現在のHTMLはまだ作成していません。')
+        htmlViewRef.current = 'candidate'
+        setHtmlView('candidate')
+      }
+      setHtmlGenerationSettling(false)
+    }
+
+    async function poll() {
+      try {
+        await accept(await getHtmlGenerationStatus())
+      } catch (reason) {
+        if (!mounted.current || sequence !== htmlGenerationSequence.current) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        htmlGenerationTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+      }
+    }
+
+    void accept(initial)
+  }, [refresh])
+
   useEffect(() => {
     mounted.current = true
     void refresh()
@@ -328,10 +380,12 @@ export default function App() {
       lifecycleGeneration.current += 1
       aiGeneration.current += 1
       planningAiGeneration.current += 1
+      htmlGenerationSequence.current += 1
       if (conversionTimer.current !== null) window.clearTimeout(conversionTimer.current)
       if (lifecycleTimer.current !== null) window.clearTimeout(lifecycleTimer.current)
       if (aiTimer.current !== null) window.clearTimeout(aiTimer.current)
       if (planningAiTimer.current !== null) window.clearTimeout(planningAiTimer.current)
+      if (htmlGenerationTimer.current !== null) window.clearTimeout(htmlGenerationTimer.current)
     }
   }, [refresh, trackAi, trackConversion, trackLifecycle])
 
@@ -358,6 +412,18 @@ export default function App() {
       .then((result) => result.status === 'running' ? trackPlanningAi(result) : setPlanningAi(result))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [state?.mode, state?.stage, trackPlanningAi])
+
+  useEffect(() => {
+    if (state?.mode !== 'html-design' || state.stage !== 'html_authoring' || state.htmlAvailable) {
+      htmlGenerationSequence.current += 1
+      if (htmlGenerationTimer.current !== null) window.clearTimeout(htmlGenerationTimer.current)
+      setHtmlGeneration(null)
+      return
+    }
+    void getHtmlGenerationStatus()
+      .then((result) => result.status === 'running' ? trackHtmlGeneration(result) : setHtmlGeneration(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+  }, [state?.mode, state?.stage, state?.htmlAvailable, trackHtmlGeneration])
 
   useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
@@ -510,6 +576,59 @@ export default function App() {
     }, 'Planning Candidateを破棄しました。')
   }
 
+  const handleStartHtmlGeneration = (instruction: string, retry = false) => {
+    const prompt = retry
+      ? '承認済み構成からHTML案の生成を再試行しますか？'
+      : '承認済み構成から確認用のHTML案をAIで生成しますか？'
+    if (!window.confirm(prompt)) return
+    setHtmlGenerationRequestBusy(true)
+    setHtmlGenerationSettling(true)
+    setError(null)
+    setNotice(null)
+    void startHtmlGeneration(instruction)
+      .then(trackHtmlGeneration)
+      .catch((reason) => {
+        setHtmlGenerationSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+      .finally(() => setHtmlGenerationRequestBusy(false))
+  }
+
+  const handleApplyHtmlGeneration = () => {
+    if (!htmlGeneration?.candidate) return
+    if (!window.confirm('このHTML案をcanonical HTMLとして採用し、HTML全体の確認へ進みますか？')) return
+    void runAction(
+      () => applyHtmlGeneration(htmlGeneration),
+      'HTML案を採用し、HTML全体の確認へ進みました。',
+    )
+  }
+
+  const handleCancelHtmlGeneration = () => {
+    if (!htmlGeneration?.candidate) return
+    if (!window.confirm('このHTML案を破棄しますか？canonical HTMLは変更されません。')) return
+    void runAction(
+      () => cancelHtmlGeneration(htmlGeneration),
+      'HTML Candidateを破棄しました。',
+    )
+  }
+
+  const handleRegenerateHtml = (instruction: string) => {
+    if (!htmlGeneration?.candidate) return
+    if (!window.confirm('現在のHTML案を破棄し、承認済み構成から再生成しますか？')) return
+    setHtmlGenerationRequestBusy(true)
+    setHtmlGenerationSettling(true)
+    setError(null)
+    setNotice(null)
+    void cancelHtmlGeneration(htmlGeneration)
+      .then(() => startHtmlGeneration(instruction))
+      .then(trackHtmlGeneration)
+      .catch((reason) => {
+        setHtmlGenerationSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+      .finally(() => setHtmlGenerationRequestBusy(false))
+  }
+
   const handleStoryboardAction = (action: StoryboardAction) => {
     if (!storyboard || busy) return
     const prompts: Record<StoryboardAction, string> = {
@@ -531,7 +650,11 @@ export default function App() {
   const conversionTransitioning = conversion?.status === 'running' || conversionSettling
   const aiTransitioning = aiRequestBusy || ai?.status === 'running' || aiSettling
   const planningAiTransitioning = planningAiRequestBusy || planningAi?.status === 'running' || planningAiSettling
-  const processing = busy || lifecycleTransitioning || conversionTransitioning || aiTransitioning || planningAiTransitioning
+  const htmlGenerationTransitioning = htmlGenerationRequestBusy
+    || htmlGeneration?.status === 'running'
+    || htmlGenerationSettling
+  const processing = busy || lifecycleTransitioning || conversionTransitioning || aiTransitioning
+    || planningAiTransitioning || htmlGenerationTransitioning
 
   if (!project || !state) {
     return (
@@ -544,7 +667,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell" data-mode={currentMode ?? state.mode} data-has-proposal={Boolean(currentProposal || storyboard?.proposal)}>
+    <div className="app-shell" data-mode={currentMode ?? state.mode} data-has-proposal={Boolean(currentProposal || storyboard?.proposal || htmlGeneration?.candidate)}>
       <header className="app-header">
         <div className="brand">
           <div className="brand-mark">B</div>
@@ -563,6 +686,7 @@ export default function App() {
         <MainCanvas
           state={state}
           review={review}
+          htmlGeneration={htmlGeneration}
           htmlView={htmlView}
           selectedSlide={selectedSlide}
           onViewChange={chooseHtmlView}
@@ -583,6 +707,7 @@ export default function App() {
           lifecycle={lifecycle}
           ai={ai}
           planningAi={planningAi}
+          htmlGeneration={htmlGeneration}
           storyboard={storyboard}
           selectedStoryboardSlide={selectedStoryboardSlide}
           onSelectSlide={setSelectedSlide}
@@ -600,6 +725,11 @@ export default function App() {
           onRetryPlanningAi={handlePlanningAiProposal}
           onApplyPlanningAi={handleApplyPlanningAi}
           onCancelPlanningAi={handleCancelPlanningAi}
+          onStartHtmlGeneration={(instruction) => handleStartHtmlGeneration(instruction, false)}
+          onRetryHtmlGeneration={(instruction) => handleStartHtmlGeneration(instruction, true)}
+          onRegenerateHtml={handleRegenerateHtml}
+          onApplyHtmlGeneration={handleApplyHtmlGeneration}
+          onCancelHtmlGeneration={handleCancelHtmlGeneration}
         />
       </div>
 

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { AppState, BentoIntegration, HtmlReview, HtmlView, Storyboard } from '../types'
+import type { AppState, BentoIntegration, HtmlGenerationStatus, HtmlReview, HtmlView, Storyboard } from '../types'
 import { StoryboardCanvas } from './StoryboardCanvas'
 
 type Props = {
   state: AppState
   review: HtmlReview | null
+  htmlGeneration: HtmlGenerationStatus | null
   htmlView: HtmlView
   selectedSlide: string | null
   onViewChange: (view: HtmlView) => void
@@ -15,9 +16,11 @@ type Props = {
   transitioning?: boolean
 }
 
-function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
+function HtmlCanvas({ review, htmlGeneration, htmlView, selectedSlide, onViewChange }: Props) {
   const frame = useRef<HTMLIFrameElement>(null)
-  const source = htmlView === 'candidate' ? review?.candidateHtmlUrl : review?.currentHtmlUrl
+  const initialCandidate = htmlGeneration?.candidate ?? null
+  const source = initialCandidate?.candidateHtmlUrl
+    ?? (htmlView === 'candidate' ? review?.candidateHtmlUrl : review?.currentHtmlUrl)
 
   const syncFrame = useCallback(() => {
     const iframe = frame.current
@@ -45,7 +48,7 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
     return () => window.removeEventListener('resize', syncFrame)
   }, [syncFrame])
 
-  if (!review || !source) {
+  if (!source) {
     return (
       <EmptyCanvas
         title="HTMLを準備しています"
@@ -57,7 +60,7 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
   return (
     <section className={`main-canvas html-canvas view-${htmlView}`}>
       <div className="canvas-toolbar">
-        <div className="view-switch" role="group" aria-label="表示する案">
+        {!initialCandidate && <div className="view-switch" role="group" aria-label="表示する案">
           <button
             type="button"
             className={htmlView === 'current' ? 'current is-active' : 'current'}
@@ -65,7 +68,7 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
           >
             現在案
           </button>
-          {review.candidateHtmlUrl && (
+          {review?.candidateHtmlUrl && (
             <button
               type="button"
               className={htmlView === 'candidate' ? 'candidate is-active' : 'candidate'}
@@ -74,9 +77,11 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
               変更案
             </button>
           )}
-        </div>
-        <span className={`view-label ${htmlView}`}>{htmlView === 'current' ? '現在案を表示中' : '変更案を表示中'}</span>
-        {review.fullPreviewUrl && (
+        </div>}
+        <span className={`view-label ${initialCandidate ? 'candidate' : htmlView}`}>
+          {initialCandidate ? '生成されたHTML案を表示中' : htmlView === 'current' ? '現在案を表示中' : '変更案を表示中'}
+        </span>
+        {review?.fullPreviewUrl && (
           <a className="text-link" href={review.fullPreviewUrl} target="_blank" rel="noreferrer">
             詳細プレビュー
           </a>
@@ -86,7 +91,7 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
         <iframe
           ref={frame}
           key={source}
-          title={htmlView === 'current' ? '現在案のHTMLプレビュー' : '変更案のHTMLプレビュー'}
+          title={initialCandidate ? '生成されたHTML案のプレビュー' : htmlView === 'current' ? '現在案のHTMLプレビュー' : '変更案のHTMLプレビュー'}
           src={source}
           sandbox="allow-same-origin"
           onLoad={syncFrame}
