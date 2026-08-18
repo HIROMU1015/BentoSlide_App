@@ -5,21 +5,24 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from bento_converter.artifact_transaction import (
+    ArtifactLeaseConflict,
     ArtifactTransactionStore,
     WriterLease,
     bytes_revision,
@@ -88,6 +91,7 @@ PLAN_FILES = {
     "slidePlan": Path("planning/slide-plan.md"),
 }
 VISUAL_PLAN_RELATIVE = Path("planning/visual-plan.yaml")
+WORK_LOG_RELATIVE = Path("planning/work-log.md")
 STAGE_OWNER = {
     "initialized": "work",
     "planning": "work",
@@ -133,6 +137,10 @@ LEGACY_STAGE_SOURCE = {
 
 class WorkflowError(RuntimeError):
     """A requested workflow operation is unsafe or invalid."""
+
+
+class PlanningRevisionConflict(WorkflowError):
+    """The reviewed planning snapshot changed before its workflow transition."""
 
 
 def _authoring_strategy(state: dict[str, Any]) -> str:
@@ -891,6 +899,116 @@ def validate_planning(root: Path) -> None:
             load_visual_plan(visual_plan)
         except BentoConverterError as exc:
             raise WorkflowError(str(exc)) from exc
+
+
+def _planned_units(state: dict[str, Any]) -> dict[str, Any]:
+    single = state.get("schemaVersion") == 2 and state.get("authoring", {}).get("mode") != "modular"
+    units = state.get("sections") if single else state.get("chapters")
+    return units if isinstance(units, dict) else {}
+
+
+def planning_artifact_paths(root: Path, state: dict[str, Any]) -> tuple[Path, ...]:
+    """Return the review-bound planning inputs in a stable repository-safe order."""
+
+    paths: list[Path] = []
+    request = state.get("project", {}).get("request")
+    if isinstance(request, str) and request:
+        paths.append(_repo_path(root, request, field="project.request"))
+    paths.extend((root / relative).resolve() for relative in PLAN_FILES.values())
+    paths.append((root / VISUAL_PLAN_RELATIVE).resolve())
+    return tuple(paths)
+
+
+def planning_action_artifact_paths(root: Path, state: dict[str, Any]) -> tuple[Path, ...]:
+    """Return every artifact protected while a planning action is committed."""
+
+    return (
+        (root / STATE_RELATIVE).resolve(),
+        *planning_artifact_paths(root, state),
+        (root / WORK_LOG_RELATIVE).resolve(),
+    )
+
+
+def planning_review_signature(root: Path, state: dict[str, Any]) -> str:
+    """Hash an unambiguous canonical record of the exact planning review inputs."""
+
+    root = root.resolve()
+    artifacts: list[dict[str, Any]] = []
+    review_paths = ((root / STATE_RELATIVE).resolve(), *planning_artifact_paths(root, state))
+    for path in review_paths:
+        relative = path.relative_to(root).as_posix()
+        if path.is_file():
+            payload = path.read_bytes()
+            artifacts.append({
+                "path": relative,
+                "status": "present",
+                "byteLength": len(payload),
+                "contentDigest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            })
+        else:
+            artifacts.append({
+                "path": relative,
+                "status": "missing",
+                "byteLength": 0,
+                "contentDigest": None,
+            })
+    canonical = {
+        "format": "bento/planning-review-signature/v1",
+        "stage": str(state.get("workflow", {}).get("stage") or ""),
+        "artifacts": artifacts,
+        "units": list(_planned_units(state).items()),
+    }
+    payload = json.dumps(
+        canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def planning_is_ready(root: Path, state: dict[str, Any]) -> bool:
+    """Check submission/approval prerequisites without changing repository state."""
+
+    try:
+        validate_planning(root)
+    except WorkflowError:
+        return False
+    return bool(_planned_units(state))
+
+
+@contextmanager
+def planning_action_guard(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> Iterator[WriterLease]:
+    """Hold the cross-process planning/state lease and refresh the caller's state."""
+
+    required = set(planning_action_artifact_paths(root, state))
+    lease = inherited_writer_lease or WriterLease(root, required)
+    acquired_here = inherited_writer_lease is None
+    try:
+        if acquired_here:
+            lease.acquire()
+        elif not lease.acquired or not required.issubset(set(lease.artifacts)):
+            raise PlanningRevisionConflict(
+                "構成案の保護状態が更新されています。最新のStoryboardを読み直してください。"
+            )
+        fresh = load_state(root)
+        fresh_required = set(planning_action_artifact_paths(root, fresh))
+        if not fresh_required.issubset(set(lease.artifacts)):
+            raise PlanningRevisionConflict(
+                "構成案の保存場所が更新されています。最新のStoryboardを読み直してください。"
+            )
+        state.clear()
+        state.update(fresh)
+        yield lease
+    except ArtifactLeaseConflict as exc:
+        raise PlanningRevisionConflict(
+            "構成案を別の処理が更新中です。完了後にStoryboardを読み直してください。"
+        ) from exc
+    finally:
+        if acquired_here:
+            lease.release()
 
 
 def _load_chapter(root: Path, chapter_id: str, entry: dict[str, Any]) -> tuple[ChapterHtmlParser, dict[str, Any]]:
@@ -1958,39 +2076,66 @@ def command_configure_sections(root: Path, state: dict[str, Any], section_ids: I
     append_work_log(root, "Configured sections: " + ", ".join(values))
 
 
-def command_submit_plan(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "planning")
-    validate_planning(root)
-    planned_units = state["sections"] if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular" else state["chapters"]
-    if not planned_units:
-        raise WorkflowError("Register the planned sections or chapters before requesting approval")
-    _transition(state, "awaiting_plan_approval", "awaiting_approval")
-    atomic_write_state(root, state)
-    append_work_log(root, "Submitted explanation policy, story outline, and slide plan for approval")
+def command_submit_plan(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    expected_planning_signature: str | None = None,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
+    with planning_action_guard(root, state, inherited_writer_lease=inherited_writer_lease):
+        _require_stage(state, "planning")
+        validate_planning(root)
+        if not _planned_units(state):
+            raise WorkflowError("Register the planned sections or chapters before requesting approval")
+        current_signature = planning_review_signature(root, state)
+        if expected_planning_signature is not None and not hmac.compare_digest(
+            current_signature, expected_planning_signature,
+        ):
+            raise PlanningRevisionConflict(
+                "構成案が更新されています。最新のStoryboardを読み直してください。"
+            )
+        _transition(state, "awaiting_plan_approval", "awaiting_approval")
+        atomic_write_state(root, state)
+        append_work_log(root, "Submitted explanation policy, story outline, and slide plan for approval")
 
 
-def command_approve_plan(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "awaiting_plan_approval")
-    validate_planning(root)
-    single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular"
-    planned_units = state["sections"] if single else state["chapters"]
-    if not planned_units:
-        raise WorkflowError("No sections or chapters are configured")
-    for key in ("explanationPolicy", "storyOutline", "slidePlan"):
-        state["approvals"][key] = "approved"
-    first = next(iter(planned_units))
-    if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
-        state["authoring"]["htmlChange"] = None
-        state["authoring"]["htmlReview"] = None
-        for entry in state["sections"].values():
-            entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
-        _transition(state, "html_authoring", "in_progress", current=None)
-    else:
-        if single and state["sections"][first].get("canonical") is not None:
-            state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
-        _transition(state, "html_authoring", "in_progress", current=first)
-    atomic_write_state(root, state)
-    append_work_log(root, "Recorded plan approval and opened HTML authoring")
+def command_approve_plan(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    expected_planning_signature: str | None = None,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
+    with planning_action_guard(root, state, inherited_writer_lease=inherited_writer_lease):
+        _require_stage(state, "awaiting_plan_approval")
+        validate_planning(root)
+        single = state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular"
+        planned_units = _planned_units(state)
+        if not planned_units:
+            raise WorkflowError("No sections or chapters are configured")
+        current_signature = planning_review_signature(root, state)
+        if expected_planning_signature is not None and not hmac.compare_digest(
+            current_signature, expected_planning_signature,
+        ):
+            raise PlanningRevisionConflict(
+                "構成案が更新されています。最新のStoryboardを読み直してください。"
+            )
+        for key in ("explanationPolicy", "storyOutline", "slidePlan"):
+            state["approvals"][key] = "approved"
+        first = next(iter(planned_units))
+        if single and _authoring_strategy(state) == WHOLE_DECK_STRATEGY:
+            state["authoring"]["htmlChange"] = None
+            state["authoring"]["htmlReview"] = None
+            for entry in state["sections"].values():
+                entry.update({"status": "html_authoring", "canonical": "html", "approvalDigest": None})
+            _transition(state, "html_authoring", "in_progress", current=None)
+        else:
+            if single and state["sections"][first].get("canonical") is not None:
+                state["sections"][first].update({"status": "html_authoring", "canonical": "html"})
+            _transition(state, "html_authoring", "in_progress", current=first)
+        atomic_write_state(root, state)
+        append_work_log(root, "Recorded plan approval and opened HTML authoring")
 
 
 def _select_section(state: dict[str, Any], requested: str | None) -> str:

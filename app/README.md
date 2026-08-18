@@ -39,8 +39,8 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 - `GET /api/project`, `/api/state`, `/api/slides`: `deck.yaml`をUI向けview modelへ変換します。
 - `GET /api/storyboard`: `REQUEST.md`、3つのplanning文書、任意のvisual plan、section／chapter順を読み取り専用view modelとして返します。
 - `POST /api/storyboard/initialize`: `initialized`で一次資料を確認し、既存の初期化処理へ委譲します。
-- `POST /api/storyboard/submit`: `planning`で既存のplanning検証を実行し、構成案を確認待ちにします。
-- `POST /api/storyboard/approve`: `awaiting_plan_approval`で既存の承認処理を実行し、HTML制作へ進めます。
+- `POST /api/storyboard/submit`: `planning`でplanning文書とsection／chapterが揃っていることを検証し、確認したrevisionのまま構成案を確認待ちにします。
+- `POST /api/storyboard/approve`: `awaiting_plan_approval`で確認したrevisionを再検証し、変化がなければHTML制作へ進めます。
 - `GET /api/html/review`: 人が読むsummary、impact、affected slideとopaque action tokenだけを返します。
 - `POST /api/html/review/apply`: 全affected slideの確認を検証してから、既存approve/apply/browser-check関数を順に呼びます。
 - `POST /api/html/review/approve-deck`: 既存whole-deck approvalを呼びます。
@@ -75,7 +75,7 @@ awaiting_plan_approval
   -> この構成を承認
 ```
 
-各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenはworkflow stage、表示対象のplanning文書、visual plan、section／chapterの順序と状態へ固定したprocess-local値です。画面表示後にいずれかが変わった場合は`409 Conflict`となり、最新のStoryboardを読み直してから操作します。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。
+各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenは`deck.yaml`、表示対象の各planning文書、visual plan、section／chapterの順序と状態を、path・有無・byte長・個別SHA-256を持つcanonical recordへ固定したprocess-local値です。提出・承認では同じartifact群のOSレベルwriter leaseを取得して再照合し、画面表示後または遷移直前に内容が変わった場合は`409 Conflict`として`deck.yaml`を変更しません。必要な文書とsection／chapterが揃うまでは提出・承認操作を表示しません。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。
 
 承認直後の`html_authoring`でHTMLがまだ存在しない間は「HTMLを準備しています」と表示します。この状態ではHTML review、slide preview、AI Actionsを要求しません。HTMLデザインが既存経路で作成された後に「状態を更新」すると、通常のHTML Design確認へ切り替わります。
 

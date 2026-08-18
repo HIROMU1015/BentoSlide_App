@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,10 +14,14 @@ from fastapi.testclient import TestClient
 from app.backend.main import create_app
 from app.backend.services.storyboard_service import StoryboardService
 from scripts.deck_workflow import (
+    PlanningRevisionConflict,
     WorkflowError,
     atomic_write_state,
+    command_approve_plan,
     command_configure_sections,
+    command_submit_plan,
     load_state,
+    planning_review_signature,
 )
 
 
@@ -142,6 +148,116 @@ class StoryboardServiceApiTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "更新"):
             self.service.submit(action_token=current_token)
         self.assertEqual((self.root / "deck.yaml").read_bytes(), reordered)
+
+    def test_signature_frames_each_file_and_rotates_token_when_bytes_move_between_files(self) -> None:
+        self.initialize_and_configure()
+        explanation = self.root / "planning/explanation-policy.md"
+        story = self.root / "planning/story-outline.md"
+        boundary = b"\0present\0"
+        explanation.write_bytes(b"# Explanation\n\nalpha" + boundary)
+        story.write_bytes(b"# Story\n\nbeta")
+        state = load_state(self.root)
+        original_signature = planning_review_signature(self.root, state)
+        original_token = self.service.view().actionToken
+
+        explanation.write_bytes(b"# Explanation\n\nalpha")
+        story.write_bytes(boundary + b"# Story\n\nbeta")
+
+        self.assertNotEqual(planning_review_signature(self.root, state), original_signature)
+        self.assertNotEqual(self.service.view().actionToken, original_token)
+
+    def test_submit_and_approve_recheck_signature_inside_writer_lease(self) -> None:
+        self.initialize_and_configure()
+        story = self.root / "planning/story-outline.md"
+
+        def racing_submit(root: Path, state: dict[str, object], **kwargs: object) -> None:
+            story.write_text("# 全体ストーリー\n\n提出直前に更新されました。\n", encoding="utf-8")
+            command_submit_plan(root, state, **kwargs)  # type: ignore[arg-type]
+
+        racing_service = StoryboardService(self.root, submit=racing_submit)
+        before_submit = (self.root / "deck.yaml").read_bytes()
+        with self.assertRaisesRegex(PlanningRevisionConflict, "更新"):
+            racing_service.submit(action_token=racing_service.view().actionToken)
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), before_submit)
+
+        stable_service = StoryboardService(self.root)
+        stable_service.submit(action_token=stable_service.view().actionToken)
+
+        def racing_approve(root: Path, state: dict[str, object], **kwargs: object) -> None:
+            story.write_text("# 全体ストーリー\n\n承認直前に更新されました。\n", encoding="utf-8")
+            command_approve_plan(root, state, **kwargs)  # type: ignore[arg-type]
+
+        approval_service = StoryboardService(self.root, approve=racing_approve)
+        before_approve = (self.root / "deck.yaml").read_bytes()
+        with self.assertRaisesRegex(PlanningRevisionConflict, "更新"):
+            approval_service.approve(action_token=approval_service.view().actionToken)
+        self.assertEqual((self.root / "deck.yaml").read_bytes(), before_approve)
+
+    def test_cross_process_planning_lease_rejects_submit_without_state_change(self) -> None:
+        self.initialize_and_configure()
+        story = self.root / "planning/story-outline.md"
+        script = (
+            "import sys\n"
+            "from bento_converter.artifact_transaction import WriterLease\n"
+            "lease = WriterLease(sys.argv[1], (sys.argv[2],))\n"
+            "lease.acquire()\n"
+            "print('ready', flush=True)\n"
+            "sys.stdin.readline()\n"
+            "lease.release()\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(self.root), str(story)],
+            cwd=ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            ready = process.stdout.readline().strip() if process.stdout else ""
+            if ready != "ready":
+                stderr = process.stderr.read() if process.stderr else ""
+                self.fail(f"lease holder did not start: {stderr}")
+            before = (self.root / "deck.yaml").read_bytes()
+            response = self.client().post("/api/storyboard/submit", json={
+                "confirmed": True,
+                "actionToken": self.service.view().actionToken,
+            })
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("更新中", response.json()["error"])
+            self.assertEqual((self.root / "deck.yaml").read_bytes(), before)
+        finally:
+            if process.stdin:
+                process.stdin.write("\n")
+                process.stdin.flush()
+            process.communicate(timeout=10)
+        metadata = list((self.root / "output/.bento-transactions/leases").glob("writer-*.json"))
+        self.assertEqual(metadata, [])
+
+    def test_partial_section_matches_are_one_to_one_and_keep_visuals_on_their_slides(self) -> None:
+        self.service.initialize(action_token=self.service.view().actionToken)
+        command_configure_sections(self.root, load_state(self.root), ("method", "other"))
+
+        view = self.service.view()
+
+        self.assertEqual([section.id for section in view.sections], ["method", "other"])
+        self.assertEqual([[slide.title for slide in section.slides] for section in view.sections], [["方法"], ["背景"]])
+        self.assertEqual([[slide.id for slide in section.slides] for section in view.sections], [["method-1"], ["intro-1"]])
+        self.assertEqual(view.sections[0].slides[0].visual.type, "none")  # type: ignore[union-attr]
+        self.assertEqual(view.sections[1].slides[0].visual.type, "native-diagram")  # type: ignore[union-attr]
+        self.assertEqual(len({slide.title for section in view.sections for slide in section.slides}), 2)
+
+    def test_submit_and_approve_readiness_requires_current_documents_and_units(self) -> None:
+        self.service.initialize(action_token=self.service.view().actionToken)
+        self.assertFalse(self.service.view().canSubmit)
+
+        command_configure_sections(self.root, load_state(self.root), ("introduction", "method"))
+        self.assertTrue(self.service.view().canSubmit)
+        self.service.submit(action_token=self.service.view().actionToken)
+        self.assertTrue(self.service.view().canApprove)
+
+        (self.root / "planning/story-outline.md").write_text("# 全体ストーリー\n", encoding="utf-8")
+        self.assertFalse(self.service.view().canApprove)
 
     def test_api_delegates_full_transition_and_html_authoring_is_safe_without_html(self) -> None:
         client = self.client()

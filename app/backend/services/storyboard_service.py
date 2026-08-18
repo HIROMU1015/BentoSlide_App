@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import hmac
-import json
 import re
 import secrets
 import threading
@@ -15,11 +13,15 @@ from bento_converter.visual_planning import load_visual_plan
 from scripts.deck_workflow import (
     PLAN_FILES,
     VISUAL_PLAN_RELATIVE,
+    PlanningRevisionConflict,
     WorkflowError,
     command_approve_plan,
     command_initialize,
     command_submit_plan,
     load_state,
+    planning_action_guard,
+    planning_is_ready,
+    planning_review_signature,
 )
 
 from app.backend.models.view_models import (
@@ -152,8 +154,8 @@ class StoryboardService:
         *,
         state_loader: Callable[[Path], dict[str, Any]] = load_state,
         initialize: Callable[[Path, dict[str, Any]], None] = command_initialize,
-        submit: Callable[[Path, dict[str, Any]], None] = command_submit_plan,
-        approve: Callable[[Path, dict[str, Any]], None] = command_approve_plan,
+        submit: Callable[..., None] = command_submit_plan,
+        approve: Callable[..., None] = command_approve_plan,
     ):
         self.repository = Path(repository).resolve()
         self._state_loader = state_loader
@@ -173,25 +175,8 @@ class StoryboardService:
             raise WorkflowError("Storyboard configuration contains an unsafe document location") from exc
         return path
 
-    def _planning_paths(self, state: dict[str, Any]) -> list[Path]:
-        request = state.get("project", {}).get("request")
-        paths = [self._artifact_path(request)] if isinstance(request, str) and request else []
-        paths.extend(self._artifact_path(relative) for relative in PLAN_FILES.values())
-        paths.append(self._artifact_path(VISUAL_PLAN_RELATIVE))
-        return paths
-
     def _signature(self, state: dict[str, Any]) -> str:
-        digest = hashlib.sha256()
-        digest.update(str(state.get("workflow", {}).get("stage") or "").encode("utf-8"))
-        for path in self._planning_paths(state):
-            digest.update(b"\0present\0" if path.is_file() else b"\0missing\0")
-            if path.is_file():
-                digest.update(path.read_bytes())
-        units = state.get("sections") if state.get("schemaVersion") == 2 and state.get("authoring", {}).get("mode") != "modular" else state.get("chapters")
-        digest.update(json.dumps(
-            list((units or {}).items()), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8"))
-        return digest.hexdigest()
+        return planning_review_signature(self.repository, state)
 
     def _action_token(self, state: dict[str, Any]) -> str:
         signature = self._signature(state)
@@ -219,42 +204,70 @@ class StoryboardService:
         visuals = self._visuals()
         visual_by_id = {str(entry["id"]): entry for entry in visuals}
         visual_order = [str(entry["id"]) for entry in visuals]
+        parsed_slides = [slide for section in parsed for slide in section.slides]
+        inferred_visual_ids: dict[int, str] = {}
+        if (
+            len(visual_order) == len(parsed_slides)
+            and len(set(visual_order)) == len(visual_order)
+            and [slide.number for slide in parsed_slides] == list(range(1, len(parsed_slides) + 1))
+        ):
+            inferred_visual_ids = {
+                id(slide): visual_order[slide.number - 1] for slide in parsed_slides
+            }
         single = state.get("schemaVersion") == 2 and state.get("authoring", {}).get("mode") != "modular"
         units = state.get("sections") if single else state.get("chapters")
         unit_items = list((units or {}).items())
         if not unit_items:
             unit_items = [(item.identifier or f"section-{index}", {"title": item.identifier}) for index, item in enumerate(parsed, start=1)]
 
-        parsed_by_id = {item.identifier.casefold(): item for item in parsed if item.identifier}
-        used: set[int] = set()
+        parsed_by_id: dict[str, list[int]] = {}
+        for parsed_index, item in enumerate(parsed):
+            if item.identifier:
+                parsed_by_id.setdefault(item.identifier.casefold(), []).append(parsed_index)
+        assignments: list[int | None] = [None] * len(unit_items)
+        used_indices: set[int] = set()
+        for unit_index, (unit_id, _entry) in enumerate(unit_items):
+            candidates = [
+                index for index in parsed_by_id.get(str(unit_id).casefold(), [])
+                if index not in used_indices
+            ]
+            if len(candidates) == 1:
+                assignments[unit_index] = candidates[0]
+                used_indices.add(candidates[0])
+        remaining = iter(index for index in range(len(parsed)) if index not in used_indices)
+        for unit_index, assignment in enumerate(assignments):
+            if assignment is None:
+                fallback = next(remaining, None)
+                assignments[unit_index] = fallback
+                if fallback is not None:
+                    used_indices.add(fallback)
+
+        def visual_for(slide_id: str) -> StoryboardVisual | None:
+            visual_entry = visual_by_id.get(slide_id)
+            if not visual_entry:
+                return None
+            visual_value = visual_entry["visual"]
+            return StoryboardVisual(
+                recommended=bool(visual_value["recommended"]),
+                type=str(visual_value["type"]),
+                intent=str(visual_value.get("intent")) if visual_value.get("intent") else None,
+                purpose=str(visual_entry.get("purpose")) if visual_entry.get("purpose") else None,
+            )
+
         result: list[StoryboardSection] = []
-        global_position = 0
         for unit_index, (unit_id, entry_value) in enumerate(unit_items):
             entry = entry_value if isinstance(entry_value, dict) else {}
-            matched = parsed_by_id.get(str(unit_id).casefold())
-            if matched is None and unit_index < len(parsed):
-                matched = parsed[unit_index]
-            if matched is not None:
-                used.add(id(matched))
-            parsed_slides = matched.slides if matched else []
+            matched_index = assignments[unit_index]
+            matched = parsed[matched_index] if matched_index is not None else None
+            section_slides = matched.slides if matched else []
             planned_ids = entry.get("slideIds") if isinstance(entry.get("slideIds"), list) else []
             slides: list[StoryboardSlide] = []
-            for local_index, parsed_slide in enumerate(parsed_slides):
+            for local_index, parsed_slide in enumerate(section_slides):
                 slide_id = str(planned_ids[local_index]) if local_index < len(planned_ids) else ""
-                if not slide_id and global_position < len(visual_order):
-                    slide_id = visual_order[global_position]
+                if not slide_id:
+                    slide_id = inferred_visual_ids.get(id(parsed_slide), "")
                 if not slide_id:
                     slide_id = f"storyboard-slide-{unit_id}-{parsed_slide.number}"
-                visual_entry = visual_by_id.get(slide_id)
-                visual = None
-                if visual_entry:
-                    visual_value = visual_entry["visual"]
-                    visual = StoryboardVisual(
-                        recommended=bool(visual_value["recommended"]),
-                        type=str(visual_value["type"]),
-                        intent=str(visual_value.get("intent")) if visual_value.get("intent") else None,
-                        purpose=str(visual_entry.get("purpose")) if visual_entry.get("purpose") else None,
-                    )
                 section_title = str(entry.get("title") or (matched.identifier if matched else unit_id))
                 slides.append(StoryboardSlide(
                     id=slide_id,
@@ -263,36 +276,27 @@ class StoryboardService:
                     points=parsed_slide.points,
                     sectionId=str(unit_id),
                     sectionTitle=section_title,
-                    visual=visual,
+                    visual=visual_for(slide_id),
                 ))
-                global_position += 1
             result.append(StoryboardSection(
                 id=str(unit_id),
                 title=str(entry.get("title") or (matched.identifier if matched else unit_id)),
                 slides=slides,
             ))
 
-        for item in parsed:
-            if id(item) in used:
+        for parsed_index, item in enumerate(parsed):
+            if parsed_index in used_indices:
                 continue
             slides = []
             for parsed_slide in item.slides:
-                slide_id = visual_order[global_position] if global_position < len(visual_order) else f"storyboard-slide-{item.identifier}-{parsed_slide.number}"
-                visual_entry = visual_by_id.get(slide_id)
-                visual = None
-                if visual_entry:
-                    visual_value = visual_entry["visual"]
-                    visual = StoryboardVisual(
-                        recommended=bool(visual_value["recommended"]), type=str(visual_value["type"]),
-                        intent=str(visual_value.get("intent")) if visual_value.get("intent") else None,
-                        purpose=str(visual_entry.get("purpose")) if visual_entry.get("purpose") else None,
-                    )
+                slide_id = inferred_visual_ids.get(
+                    id(parsed_slide), f"storyboard-slide-{item.identifier}-{parsed_slide.number}",
+                )
                 slides.append(StoryboardSlide(
                     id=slide_id, number=parsed_slide.number, title=parsed_slide.title,
                     points=parsed_slide.points, sectionId=item.identifier, sectionTitle=item.identifier,
-                    visual=visual,
+                    visual=visual_for(slide_id),
                 ))
-                global_position += 1
             result.append(StoryboardSection(id=item.identifier, title=item.identifier, slides=slides))
         return result
 
@@ -304,6 +308,7 @@ class StoryboardService:
         explanation = _read_optional_text(self._artifact_path(PLAN_FILES["explanationPolicy"]))
         story = _read_optional_text(self._artifact_path(PLAN_FILES["storyOutline"]))
         slide_plan = _read_optional_text(self._artifact_path(PLAN_FILES["slidePlan"]))
+        ready = planning_is_ready(self.repository, state)
         next_actions = {
             "initialized": "資料を確認して構成作成を開始します。",
             "planning": "説明方針、全体ストーリー、スライド構成を確認して提出します。",
@@ -318,15 +323,15 @@ class StoryboardService:
             slidePlan=_document(slide_plan, fallback_title="スライド構成"),
             sections=self._sections(state, slide_plan),
             canInitialize=stage == "initialized",
-            canSubmit=stage == "planning",
-            canApprove=stage == "awaiting_plan_approval",
+            canSubmit=stage == "planning" and ready,
+            canApprove=stage == "awaiting_plan_approval" and ready,
             nextActionLabel=next_actions.get(stage, "Storyboardの確認操作は完了しています。"),
             actionToken=self._action_token(state),
         )
 
     def _run_action(
         self, *, expected_stage: str, action_token: str,
-        command: Callable[[Path, dict[str, Any]], None], failure_message: str,
+        command: Callable[..., None], failure_message: str, protect_planning: bool = False,
     ) -> StoryboardResponse:
         with self._action_lock:
             try:
@@ -335,11 +340,29 @@ class StoryboardService:
                 raise WorkflowError(failure_message) from exc
             if state["workflow"]["stage"] != expected_stage:
                 raise WorkflowError("現在の段階ではこのStoryboard操作を実行できません。")
-            self._require_token(state, action_token)
-            try:
-                command(self.repository, state)
-            except WorkflowError as exc:
-                raise WorkflowError(failure_message) from exc
+            if protect_planning:
+                with planning_action_guard(self.repository, state) as lease:
+                    if state["workflow"]["stage"] != expected_stage:
+                        raise WorkflowError("現在の段階ではこのStoryboard操作を実行できません。")
+                    self._require_token(state, action_token)
+                    signature = self._signature(state)
+                    try:
+                        command(
+                            self.repository,
+                            state,
+                            expected_planning_signature=signature,
+                            inherited_writer_lease=lease,
+                        )
+                    except PlanningRevisionConflict:
+                        raise
+                    except WorkflowError as exc:
+                        raise WorkflowError(failure_message) from exc
+            else:
+                self._require_token(state, action_token)
+                try:
+                    command(self.repository, state)
+                except WorkflowError as exc:
+                    raise WorkflowError(failure_message) from exc
             return self.view()
 
     def initialize(self, *, action_token: str) -> StoryboardResponse:
@@ -352,10 +375,12 @@ class StoryboardService:
         return self._run_action(
             expected_stage="planning", action_token=action_token, command=self._submit,
             failure_message="構成案を提出できませんでした。説明方針、ストーリー、スライド構成、section構成を確認してください。",
+            protect_planning=True,
         )
 
     def approve(self, *, action_token: str) -> StoryboardResponse:
         return self._run_action(
             expected_stage="awaiting_plan_approval", action_token=action_token, command=self._approve,
             failure_message="構成案を承認できませんでした。最新の構成内容を確認して再試行してください。",
+            protect_planning=True,
         )
