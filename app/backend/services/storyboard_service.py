@@ -203,17 +203,6 @@ class StoryboardService:
         parsed = _slide_plan_sections(slide_plan_text)
         visuals = self._visuals()
         visual_by_id = {str(entry["id"]): entry for entry in visuals}
-        visual_order = [str(entry["id"]) for entry in visuals]
-        parsed_slides = [slide for section in parsed for slide in section.slides]
-        inferred_visual_ids: dict[int, str] = {}
-        if (
-            len(visual_order) == len(parsed_slides)
-            and len(set(visual_order)) == len(visual_order)
-            and [slide.number for slide in parsed_slides] == list(range(1, len(parsed_slides) + 1))
-        ):
-            inferred_visual_ids = {
-                id(slide): visual_order[slide.number - 1] for slide in parsed_slides
-            }
         single = state.get("schemaVersion") == 2 and state.get("authoring", {}).get("mode") != "modular"
         units = state.get("sections") if single else state.get("chapters")
         unit_items = list((units or {}).items())
@@ -265,8 +254,6 @@ class StoryboardService:
             for local_index, parsed_slide in enumerate(section_slides):
                 slide_id = str(planned_ids[local_index]) if local_index < len(planned_ids) else ""
                 if not slide_id:
-                    slide_id = inferred_visual_ids.get(id(parsed_slide), "")
-                if not slide_id:
                     slide_id = f"storyboard-slide-{unit_id}-{parsed_slide.number}"
                 section_title = str(entry.get("title") or (matched.identifier if matched else unit_id))
                 slides.append(StoryboardSlide(
@@ -289,9 +276,7 @@ class StoryboardService:
                 continue
             slides = []
             for parsed_slide in item.slides:
-                slide_id = inferred_visual_ids.get(
-                    id(parsed_slide), f"storyboard-slide-{item.identifier}-{parsed_slide.number}",
-                )
+                slide_id = f"storyboard-slide-{item.identifier}-{parsed_slide.number}"
                 slides.append(StoryboardSlide(
                     id=slide_id, number=parsed_slide.number, title=parsed_slide.title,
                     points=parsed_slide.points, sectionId=item.identifier, sectionTitle=item.identifier,

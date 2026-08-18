@@ -110,7 +110,11 @@ class ProjectMetadataCommandTests(unittest.TestCase):
                 self.root, before,
                 kind="workflow_explainer", title="BentoSlideができるまで",
             )
-        replace.assert_called_once()
+        deck_replaces = [
+            call for call in replace.call_args_list
+            if Path(call.args[1]).resolve() == (self.root / "deck.yaml").resolve()
+        ]
+        self.assertEqual(len(deck_replaces), 1)
         self.assertEqual(self.state(), expected)
         self.assertFalse(list(self.root.glob(".deck.*.yaml.tmp")))
         self.assertIn("workflow_explainer", (self.root / "planning/work-log.md").read_text(encoding="utf-8"))

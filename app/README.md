@@ -62,7 +62,7 @@ Frontendへproposal digest、revision、任意のartifact path、PIDは返しま
 
 ## App内のStoryboard確認フロー
 
-`initialized`、`planning`、`awaiting_plan_approval`では、左にsection別のスライド一覧、中央に構成カード、右に依頼・説明方針・全体ストーリー・スライド構成と選択中の詳細を表示します。Markdown本文はHTMLとして挿入せず、文字列・段落・箇条書きへ変換して表示します。Visual planがある場合だけ、推奨ビジュアルの種類と意図をカードとInspectorへ添えます。
+`initialized`、`planning`、`awaiting_plan_approval`では、左にsection別のスライド一覧、中央に構成カード、右に依頼・説明方針・全体ストーリー・スライド構成と選択中の詳細を表示します。Markdown本文はHTMLとして挿入せず、文字列・段落・箇条書きへ変換して表示します。Visual planがある場合は、`deck.yaml`のsectionに明示されたslide IDと完全一致する項目だけをカードとInspectorへ添えます。順番からvisualを推測しないため、対応を確認できない項目は未対応として安全に表示します。
 
 Inspectorに表示する操作は現在stageの1つだけです。
 
@@ -75,7 +75,7 @@ awaiting_plan_approval
   -> この構成を承認
 ```
 
-各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenは`deck.yaml`、表示対象の各planning文書、visual plan、section／chapterの順序と状態を、path・有無・byte長・個別SHA-256を持つcanonical recordへ固定したprocess-local値です。提出・承認では同じartifact群のOSレベルwriter leaseを取得して再照合し、画面表示後または遷移直前に内容が変わった場合は`409 Conflict`として`deck.yaml`を変更しません。必要な文書とsection／chapterが揃うまでは提出・承認操作を表示しません。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。
+各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenは`deck.yaml`、表示対象の各planning文書、visual plan、section／chapterの順序と状態を、path・有無・byte長・個別SHA-256を持つcanonical recordへ固定したprocess-local値です。提出・承認だけでなく、request、project metadata、section／chapter設定、planning文書の組み込みwriterも同じartifact群のOSレベルwriter leaseを取得します。画面表示後または遷移直前に内容が変わった場合や別processが更新中の場合は`409 Conflict`として`deck.yaml`を変更しません。必要な文書とsection／chapterが揃うまでは提出・承認操作を表示しません。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。Codexなどのオフラインwriterは、固定された4種類だけを扱う`write-planning-artifact`経路を使用します。
 
 承認直後の`html_authoring`でHTMLがまだ存在しない間は「HTMLを準備しています」と表示します。この状態ではHTML review、slide preview、AI Actionsを要求しません。HTMLデザインが既存経路で作成された後に「状態を更新」すると、通常のHTML Design確認へ切り替わります。
 

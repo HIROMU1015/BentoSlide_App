@@ -66,6 +66,7 @@ propose-html-change / approve-html-change / apply-html-change / check-html-chang
 status [--json]                 consistent status; refresh stale content approval
 route [--json]                  deterministic primary-workspace route
 capture-request --text ...      persist the conversational brief in REQUEST.md
+write-planning-artifact         transactionally update one known planning file
 advance                         move to the next human checkpoint, never approve
 approve-current                 approve only the displayed plan/HTML/content checkpoint
 adopt-whole-deck                adopt an existing complete HTML deck without rewriting it
@@ -113,6 +114,8 @@ block / resume                  preserve and revalidate the complete prior tuple
 State writes are atomic. Artifact-changing state transitions use the durable multi-artifact transaction layer where required. All repository-relative paths are traversal checked, generated/authoring/final paths are distinct, and sidecar paths must match their HTML names.
 
 `set-project` is an agent-facing setup command, not an additional user short phrase. It is limited to schema v2 `initialized`/`planning`, changes only `project.kind` and `project.title`, and leaves stage and approvals unchanged. Blocked workflows must use `resume` first. The kind must match `^[a-z][a-z0-9_-]*$`; the title must be a non-empty single line.
+
+Planning inputs and planning state share one cross-process writer contract. `capture-request`, `set-project`, `initialize`, `configure-sections`, `configure-chapters`, `write-planning-artifact`, `submit-plan`, and `approve-plan` acquire the same review-bound `WriterLease` before refreshing state or committing. Agents must update `explanation-policy`, `story-outline`, `slide-plan`, and `visual-plan` through `write-planning-artifact --artifact ... --from-file ...` (or the corresponding workflow function), never by writing the canonical targets directly. The command accepts only those fixed targets, validates UTF-8 and visual-plan structure, and commits through the common artifact transaction layer. A concurrent writer receives a conflict and cannot be overwritten by a submit or approval transition.
 
 ## Standard single-HTML route
 

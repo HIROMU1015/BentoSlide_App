@@ -23,6 +23,8 @@ The former fixed phrases are compatibility aliases only; use `docs/legacy-comman
 
 Use `scripts.deck_workflow` for every state change. Recompute revision/digest validity rather than trusting chat history. Run `resume` after resolving a blocker. For schema v1, run `migrate --dry-run` before `migrate`; migration is stage-preserving and late-stage evidence must validate before any change.
 
+Write canonical planning documents only through `python -m scripts.deck_workflow write-planning-artifact --artifact ... --from-file ...` or `command_write_planning_artifacts`. Do not edit `planning/explanation-policy.md`, `planning/story-outline.md`, `planning/slide-plan.md`, or `planning/visual-plan.yaml` directly. This route holds the same cross-process lease as section/chapter configuration and plan submission/approval, so a reviewed revision cannot be replaced or overwritten during a transition.
+
 For schema v2 project metadata, use `python -m scripts.deck_workflow set-project --kind ... --title ...` only in `initialized` or `planning`. It is an agent-facing setup command rather than a ninth user short phrase; it changes neither workflow stage nor approvals.
 
 ## Propose and manage visuals

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
@@ -75,7 +75,7 @@ from bento_converter.work_editor_storage import (
     protected_content_fingerprint,
     validate_editor_document,
 )
-from bento_converter.visual_planning import load_visual_plan
+from bento_converter.visual_planning import load_visual_plan, validate_visual_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +91,12 @@ PLAN_FILES = {
     "slidePlan": Path("planning/slide-plan.md"),
 }
 VISUAL_PLAN_RELATIVE = Path("planning/visual-plan.yaml")
+PLANNING_ARTIFACT_FILES = {
+    "explanation-policy": PLAN_FILES["explanationPolicy"],
+    "story-outline": PLAN_FILES["storyOutline"],
+    "slide-plan": PLAN_FILES["slidePlan"],
+    "visual-plan": VISUAL_PLAN_RELATIVE,
+}
 WORK_LOG_RELATIVE = Path("planning/work-log.md")
 STAGE_OWNER = {
     "initialized": "work",
@@ -1011,6 +1017,21 @@ def planning_action_guard(
             lease.release()
 
 
+@contextmanager
+def planning_writer_guard_if_needed(
+    root: Path, state: dict[str, Any],
+) -> Iterator[WriterLease | None]:
+    """Join the planning lease for generic state writes that can run early."""
+
+    if state.get("workflow", {}).get("stage") in {
+        "initialized", "planning", "awaiting_plan_approval",
+    }:
+        with planning_action_guard(root, state) as lease:
+            yield lease
+        return
+    yield None
+
+
 def _load_chapter(root: Path, chapter_id: str, entry: dict[str, Any]) -> tuple[ChapterHtmlParser, dict[str, Any]]:
     html_path = _repo_path(root, entry["html"], field=f"chapters.{chapter_id}.html")
     registry_path = _repo_path(root, entry["registry"], field=f"chapters.{chapter_id}.registry")
@@ -1911,16 +1932,79 @@ def command_capture_request(root: Path, state: dict[str, Any], *, text: str) -> 
     cleaned = text.strip()
     if not cleaned:
         raise WorkflowError("Request text must not be blank")
-    destination = _repo_path(root, state["project"]["request"], field="project.request")
     payload = (
         "# Presentation request\n\n"
         "This file is the persisted brief captured from the conversation.\n\n"
         "## Request\n\n" + cleaned + "\n"
     ).encode("utf-8")
-    ArtifactTransactionStore(root, (destination,)).commit(
-        {destination: payload}, operation="capture-presentation-request",
-    )
-    append_work_log(root, "Captured the current presentation request in REQUEST.md")
+    with planning_action_guard(root, state) as lease:
+        destination = _repo_path(root, state["project"]["request"], field="project.request")
+        ArtifactTransactionStore(
+            root, (destination,), inherited_writer_lease=lease,
+        ).commit(
+            {destination: payload}, operation="capture-presentation-request",
+        )
+        append_work_log(root, "Captured the current presentation request in REQUEST.md")
+
+
+def _validate_planning_artifact_payload(artifact: str, payload: bytes) -> None:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise WorkflowError("Planning artifacts must be valid UTF-8") from exc
+    if "\x00" in text:
+        raise WorkflowError("Planning artifacts must not contain NUL characters")
+    if artifact != "visual-plan":
+        return
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise WorkflowError(f"Cannot parse visual plan: {exc}") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("Visual plan root must be an object")
+    try:
+        validate_visual_plan(value)
+    except BentoConverterError as exc:
+        raise WorkflowError(str(exc)) from exc
+
+
+def command_write_planning_artifacts(
+    root: Path,
+    state: dict[str, Any],
+    payloads: Mapping[str, bytes],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
+    """Transactionally write only known planning files under the review lease."""
+
+    if not payloads:
+        raise WorkflowError("At least one planning artifact is required")
+    unknown = sorted(set(payloads) - set(PLANNING_ARTIFACT_FILES))
+    if unknown:
+        raise WorkflowError("Unknown planning artifact: " + ", ".join(unknown))
+    normalized = {artifact: bytes(payload) for artifact, payload in payloads.items()}
+    for artifact, payload in normalized.items():
+        _validate_planning_artifact_payload(artifact, payload)
+
+    with planning_action_guard(
+        root, state, inherited_writer_lease=inherited_writer_lease,
+    ) as lease:
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        destinations = {
+            artifact: (root / PLANNING_ARTIFACT_FILES[artifact]).resolve()
+            for artifact in normalized
+        }
+        transaction_payloads = {
+            destinations[artifact]: payload for artifact, payload in normalized.items()
+        }
+        ArtifactTransactionStore(
+            root, tuple(destinations.values()), inherited_writer_lease=lease,
+        ).commit(
+            transaction_payloads, operation="write-planning-artifacts",
+        )
+        append_work_log(
+            root, "Updated planning artifacts: " + ", ".join(sorted(normalized)),
+        )
 
 
 def command_route(state: dict[str, Any], *, as_json: bool) -> None:
@@ -1993,9 +2077,6 @@ def command_advance(
 
 
 def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: str) -> None:
-    if state.get("schemaVersion") != 2:
-        raise WorkflowError("set-project requires deck schema v2")
-    _require_stage(state, "initialized", "planning")
     if not isinstance(kind, str) or not PROJECT_KIND_PATTERN.fullmatch(kind):
         raise WorkflowError("project kind must match ^[a-z][a-z0-9_-]*$")
     if (
@@ -2007,73 +2088,96 @@ def command_set_project(root: Path, state: dict[str, Any], *, kind: str, title: 
     ):
         raise WorkflowError("project title must be a non-empty single line without outer whitespace")
 
-    next_state = copy.deepcopy(state)
-    next_state["project"]["kind"] = kind
-    next_state["project"]["title"] = title
-    atomic_write_state(root, next_state)
-    append_work_log(root, f"Set project metadata: kind={kind!r}, title={title!r}")
+    with planning_action_guard(root, state):
+        if state.get("schemaVersion") != 2:
+            raise WorkflowError("set-project requires deck schema v2")
+        _require_stage(state, "initialized", "planning")
+        next_state = copy.deepcopy(state)
+        next_state["project"]["kind"] = kind
+        next_state["project"]["title"] = title
+        atomic_write_state(root, next_state)
+        append_work_log(root, f"Set project metadata: kind={kind!r}, title={title!r}")
 
 
 def command_initialize(root: Path, state: dict[str, Any]) -> None:
-    _require_stage(state, "initialized")
-    ensure_source_manifest(root, state)
-    selected, _ = discover_source_candidates(root, state)
-    state["project"]["primarySource"] = selected.relative_to(root).as_posix() if selected else None
-    _transition(state, "planning", "in_progress")
-    atomic_write_state(root, state)
-    append_work_log(root, f"Initialized planning with primary source {state['project']['primarySource']}")
+    with planning_action_guard(root, state):
+        _require_stage(state, "initialized")
+        ensure_source_manifest(root, state)
+        selected, _ = discover_source_candidates(root, state)
+        state["project"]["primarySource"] = selected.relative_to(root).as_posix() if selected else None
+        _transition(state, "planning", "in_progress")
+        atomic_write_state(root, state)
+        append_work_log(root, f"Initialized planning with primary source {state['project']['primarySource']}")
 
 
-def command_configure_chapters(root: Path, state: dict[str, Any], chapter_ids: Iterable[str]) -> None:
-    _require_stage(state, "planning", "awaiting_plan_approval")
-    if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular":
-        raise WorkflowError("configure-chapters is only available in modular authoring mode")
+def command_configure_chapters(
+    root: Path,
+    state: dict[str, Any],
+    chapter_ids: Iterable[str],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
     values = list(dict.fromkeys(chapter_ids))
     if not values or any(not CHAPTER_PATTERN.fullmatch(value) for value in values):
         raise WorkflowError("Chapter IDs must use chapter-XX names")
-    for existing, entry in state["chapters"].items():
-        if existing not in values and entry["status"] != "planned":
-            raise WorkflowError(f"Cannot remove chapter after authoring has begun: {existing}")
-    state["chapters"] = {
-        chapter_id: state["chapters"].get(chapter_id, {
-            "html": f"chapters/{chapter_id}.preview.html",
-            "registry": f"chapters/{chapter_id}.registry.json",
-            "status": "planned",
-            "visualApproval": "pending",
-        })
-        for chapter_id in values
-    }
-    atomic_write_state(root, state)
-    append_work_log(root, "Configured chapters: " + ", ".join(values))
+    with planning_action_guard(
+        root, state, inherited_writer_lease=inherited_writer_lease,
+    ):
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        if state.get("schemaVersion") == 2 and state["authoring"]["mode"] != "modular":
+            raise WorkflowError("configure-chapters is only available in modular authoring mode")
+        for existing, entry in state["chapters"].items():
+            if existing not in values and entry["status"] != "planned":
+                raise WorkflowError(f"Cannot remove chapter after authoring has begun: {existing}")
+        state["chapters"] = {
+            chapter_id: state["chapters"].get(chapter_id, {
+                "html": f"chapters/{chapter_id}.preview.html",
+                "registry": f"chapters/{chapter_id}.registry.json",
+                "status": "planned",
+                "visualApproval": "pending",
+            })
+            for chapter_id in values
+        }
+        atomic_write_state(root, state)
+        append_work_log(root, "Configured chapters: " + ", ".join(values))
 
 
-def command_configure_sections(root: Path, state: dict[str, Any], section_ids: Iterable[str]) -> None:
-    _require_stage(state, "planning", "awaiting_plan_approval")
-    if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
-        raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
+def command_configure_sections(
+    root: Path,
+    state: dict[str, Any],
+    section_ids: Iterable[str],
+    *,
+    inherited_writer_lease: WriterLease | None = None,
+) -> None:
     values = list(dict.fromkeys(section_ids))
     if not values or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) for value in values):
         raise WorkflowError("Section IDs must use stable alphanumeric, dot, underscore, or hyphen names")
-    for existing, entry in state["sections"].items():
-        if existing not in values and entry["status"] != "planned":
-            raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
-    state["sections"] = {
-        section_id: state["sections"].get(section_id, {
-            "title": section_id,
-            "status": "planned",
-            "canonical": "planning",
-            "slideIds": [],
-            "bentoSlideIds": [],
-            "approvalDigest": None,
-            "bentoDocumentRevision": None,
-            "bentoRegistryRevision": None,
-            "bentoSectionDigest": None,
-            "acceptedAt": None,
-        })
-        for section_id in values
-    }
-    atomic_write_state(root, state)
-    append_work_log(root, "Configured sections: " + ", ".join(values))
+    with planning_action_guard(
+        root, state, inherited_writer_lease=inherited_writer_lease,
+    ):
+        _require_stage(state, "planning", "awaiting_plan_approval")
+        if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
+            raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
+        for existing, entry in state["sections"].items():
+            if existing not in values and entry["status"] != "planned":
+                raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
+        state["sections"] = {
+            section_id: state["sections"].get(section_id, {
+                "title": section_id,
+                "status": "planned",
+                "canonical": "planning",
+                "slideIds": [],
+                "bentoSlideIds": [],
+                "approvalDigest": None,
+                "bentoDocumentRevision": None,
+                "bentoRegistryRevision": None,
+                "bentoSectionDigest": None,
+                "acceptedAt": None,
+            })
+            for section_id in values
+        }
+        atomic_write_state(root, state)
+        append_work_log(root, "Configured sections: " + ", ".join(values))
 
 
 def command_submit_plan(
@@ -4154,22 +4258,23 @@ def command_reopen_finalization(root: Path, state: dict[str, Any]) -> None:
 def command_block(root: Path, state: dict[str, Any], owner: str, reason: str) -> None:
     if not reason.strip():
         raise WorkflowError("A non-empty blocking reason is required")
-    workflow = state["workflow"]
-    if workflow["stage"] in {"blocked", "complete"}:
-        raise WorkflowError(f"Stage {workflow['stage']!r} cannot be blocked")
-    workflow["blockedFrom"] = {
-        "stage": workflow["stage"],
-        "status": workflow["status"],
-        "owner": workflow["owner"],
-        "sourceOfTruth": workflow["sourceOfTruth"],
-        "currentChapter": workflow["currentChapter"],
-    }
-    if state.get("schemaVersion") == 2:
-        workflow["blockedFrom"]["currentSection"] = workflow["currentSection"]
-    workflow.update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
-    _normalize_handoff(state)
-    atomic_write_state(root, state)
-    append_work_log(root, f"Blocked ({owner}): {reason}")
+    with planning_writer_guard_if_needed(root, state):
+        workflow = state["workflow"]
+        if workflow["stage"] in {"blocked", "complete"}:
+            raise WorkflowError(f"Stage {workflow['stage']!r} cannot be blocked")
+        workflow["blockedFrom"] = {
+            "stage": workflow["stage"],
+            "status": workflow["status"],
+            "owner": workflow["owner"],
+            "sourceOfTruth": workflow["sourceOfTruth"],
+            "currentChapter": workflow["currentChapter"],
+        }
+        if state.get("schemaVersion") == 2:
+            workflow["blockedFrom"]["currentSection"] = workflow["currentSection"]
+        workflow.update({"stage": "blocked", "status": "blocked", "owner": owner, "blockingReason": reason})
+        _normalize_handoff(state)
+        atomic_write_state(root, state)
+        append_work_log(root, f"Blocked ({owner}): {reason}")
 
 
 def _validate_resume_target(root: Path, state: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -4255,6 +4360,13 @@ def parser() -> argparse.ArgumentParser:
     route.add_argument("--json", action="store_true", dest="as_json")
     capture_request = commands.add_parser("capture-request")
     capture_request.add_argument("--text", required=True)
+    write_planning = commands.add_parser("write-planning-artifact")
+    write_planning.add_argument(
+        "--artifact", required=True, choices=tuple(PLANNING_ARTIFACT_FILES),
+    )
+    planning_source = write_planning.add_mutually_exclusive_group(required=True)
+    planning_source.add_argument("--from-file", type=Path)
+    planning_source.add_argument("--text")
     commands.add_parser("validate")
     migrate = commands.add_parser("migrate")
     migrate.add_argument("--dry-run", action="store_true")
@@ -4348,6 +4460,15 @@ def run(args: argparse.Namespace) -> int:
         command_route(state, as_json=args.as_json)
     elif command == "capture-request":
         command_capture_request(root, state, text=args.text)
+    elif command == "write-planning-artifact":
+        if args.from_file is not None:
+            try:
+                payload = args.from_file.read_bytes()
+            except OSError as exc:
+                raise WorkflowError(f"Cannot read planning artifact input: {exc}") from exc
+        else:
+            payload = args.text.encode("utf-8")
+        command_write_planning_artifacts(root, state, {args.artifact: payload})
     elif command == "validate":
         validate_current_stage(root, state)
         print(f"deck.yaml + {state['workflow']['stage']} artifacts: PASS")
@@ -4475,11 +4596,13 @@ def run(args: argparse.Namespace) -> int:
         port = int(args.url.rsplit(":", 1)[1].rstrip("/"))
         if port < 1 or port > 65535:
             raise WorkflowError("preview.currentUrl contains an invalid port")
-        state["preview"]["currentUrl"] = args.url
-        atomic_write_state(root, state)
+        with planning_writer_guard_if_needed(root, state):
+            state["preview"]["currentUrl"] = args.url
+            atomic_write_state(root, state)
     elif command == "clear-current-url":
-        state["preview"]["currentUrl"] = None
-        atomic_write_state(root, state)
+        with planning_writer_guard_if_needed(root, state):
+            state["preview"]["currentUrl"] = None
+            atomic_write_state(root, state)
     else:  # pragma: no cover
         raise WorkflowError(f"Unknown command: {command}")
     return 0

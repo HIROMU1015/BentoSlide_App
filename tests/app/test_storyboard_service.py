@@ -20,6 +20,7 @@ from scripts.deck_workflow import (
     command_approve_plan,
     command_configure_sections,
     command_submit_plan,
+    command_write_planning_artifacts,
     load_state,
     planning_review_signature,
 )
@@ -234,7 +235,54 @@ class StoryboardServiceApiTests(unittest.TestCase):
         metadata = list((self.root / "output/.bento-transactions/leases").glob("writer-*.json"))
         self.assertEqual(metadata, [])
 
-    def test_partial_section_matches_are_one_to_one_and_keep_visuals_on_their_slides(self) -> None:
+    def test_configure_and_planning_document_writers_cannot_race_submit(self) -> None:
+        self.initialize_and_configure()
+        original_story = (self.root / "planning/story-outline.md").read_bytes()
+
+        def racing_submit(root: Path, state: dict[str, object], **kwargs: object) -> None:
+            configure = subprocess.run(
+                [
+                    sys.executable, "-m", "scripts.deck_workflow", "--root", str(root),
+                    "configure-sections", "method", "other",
+                ],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            write_plan = subprocess.run(
+                [
+                    sys.executable, "-m", "scripts.deck_workflow", "--root", str(root),
+                    "write-planning-artifact", "--artifact", "story-outline",
+                    "--text", "# 全体ストーリー\n\n競合更新です。\n",
+                ],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(configure.returncode, 2, configure.stderr)
+            self.assertEqual(write_plan.returncode, 2, write_plan.stderr)
+            self.assertIn("更新中", configure.stderr)
+            self.assertIn("更新中", write_plan.stderr)
+            command_submit_plan(root, state, **kwargs)  # type: ignore[arg-type]
+
+        service = StoryboardService(self.root, submit=racing_submit)
+        submitted = service.submit(action_token=service.view().actionToken)
+
+        self.assertEqual(submitted.stage, "awaiting_plan_approval")
+        self.assertEqual(list(load_state(self.root)["sections"]), ["introduction", "method"])
+        self.assertEqual((self.root / "planning/story-outline.md").read_bytes(), original_story)
+        metadata = list((self.root / "output/.bento-transactions/leases").glob("writer-*.json"))
+        self.assertEqual(metadata, [])
+
+    def test_supported_planning_writer_updates_atomically_and_rotates_token(self) -> None:
+        self.initialize_and_configure()
+        original_token = self.service.view().actionToken
+        story = b"# Story outline\n\nUpdated through the workflow writer.\n"
+
+        command_write_planning_artifacts(
+            self.root, load_state(self.root), {"story-outline": story},
+        )
+
+        self.assertEqual((self.root / "planning/story-outline.md").read_bytes(), story)
+        self.assertNotEqual(self.service.view().actionToken, original_token)
+
+    def test_partial_section_matches_are_one_to_one_without_positional_visual_inference(self) -> None:
         self.service.initialize(action_token=self.service.view().actionToken)
         command_configure_sections(self.root, load_state(self.root), ("method", "other"))
 
@@ -242,10 +290,29 @@ class StoryboardServiceApiTests(unittest.TestCase):
 
         self.assertEqual([section.id for section in view.sections], ["method", "other"])
         self.assertEqual([[slide.title for slide in section.slides] for section in view.sections], [["方法"], ["背景"]])
-        self.assertEqual([[slide.id for slide in section.slides] for section in view.sections], [["method-1"], ["intro-1"]])
-        self.assertEqual(view.sections[0].slides[0].visual.type, "none")  # type: ignore[union-attr]
-        self.assertEqual(view.sections[1].slides[0].visual.type, "native-diagram")  # type: ignore[union-attr]
+        self.assertEqual(
+            [[slide.id for slide in section.slides] for section in view.sections],
+            [["storyboard-slide-method-2"], ["storyboard-slide-other-1"]],
+        )
+        self.assertIsNone(view.sections[0].slides[0].visual)
+        self.assertIsNone(view.sections[1].slides[0].visual)
         self.assertEqual(len({slide.title for section in view.sections for slide in section.slides}), 2)
+
+    def test_reordered_visual_plan_uses_explicit_slide_ids_instead_of_position(self) -> None:
+        self.initialize_and_configure()
+        visual_path = self.root / "planning/visual-plan.yaml"
+        visual_plan = yaml.safe_load(visual_path.read_text(encoding="utf-8"))
+        visual_plan["slides"].reverse()
+        visual_path.write_text(
+            yaml.safe_dump(visual_plan, allow_unicode=True, sort_keys=False), encoding="utf-8",
+        )
+
+        view = self.service.view()
+
+        self.assertEqual(view.sections[0].slides[0].id, "intro-1")
+        self.assertEqual(view.sections[0].slides[0].visual.type, "native-diagram")  # type: ignore[union-attr]
+        self.assertEqual(view.sections[1].slides[0].id, "method-1")
+        self.assertEqual(view.sections[1].slides[0].visual.type, "none")  # type: ignore[union-attr]
 
     def test_submit_and_approve_readiness_requires_current_documents_and_units(self) -> None:
         self.service.initialize(action_token=self.service.view().actionToken)
