@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker
@@ -49,6 +49,10 @@ from bento_converter.html_change_review import (
 )
 from bento_converter.html_pipeline import build_from_html
 from bento_converter.html_source import REGISTRY_FORMAT
+from bento_converter.planning_proposal import (
+    candidate_signature as planning_candidate_signature,
+    validate_planning_candidate,
+)
 from bento_converter.registry_document import (
     canonical_registry_json,
     load_registry,
@@ -747,7 +751,7 @@ def atomic_write_state(root: Path, state: dict[str, Any]) -> None:
     validate_state(root, state)
     destination = root / STATE_RELATIVE
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = yaml.safe_dump(state, allow_unicode=True, sort_keys=False).encode("utf-8")
+    payload = _state_payload(state)
     handle = tempfile.NamedTemporaryFile(prefix=".deck.", suffix=".yaml.tmp", dir=destination.parent, delete=False)
     temporary = Path(handle.name)
     try:
@@ -765,6 +769,18 @@ def atomic_write_state(root: Path, state: dict[str, Any]) -> None:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _state_payload(state: dict[str, Any]) -> bytes:
+    return yaml.safe_dump(state, allow_unicode=True, sort_keys=False).encode("utf-8")
+
+
+def _work_log_payload(root: Path, message: str) -> bytes:
+    path = root / WORK_LOG_RELATIVE
+    existing = path.read_text(encoding="utf-8") if path.is_file() else "# Work log\n\n"
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    return (existing + f"- {utc_now()} — {message}\n").encode("utf-8")
 
 
 def append_work_log(root: Path, message: str) -> None:
@@ -2142,6 +2158,47 @@ def command_configure_chapters(
         append_work_log(root, "Configured chapters: " + ", ".join(values))
 
 
+def _configured_sections(
+    state: dict[str, Any], sections: Sequence[Mapping[str, Any]], *, require_slide_ids: bool = True,
+) -> dict[str, dict[str, Any]]:
+    values = [str(section["id"]) for section in sections]
+    if not values or len(values) != len(set(values)):
+        raise WorkflowError("Planning sections must have unique stable IDs")
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) for value in values):
+        raise WorkflowError("Section IDs must use stable alphanumeric, dot, underscore, or hyphen names")
+    for existing, entry in state["sections"].items():
+        if existing not in values and entry["status"] != "planned":
+            raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
+    configured: dict[str, dict[str, Any]] = {}
+    for section in sections:
+        section_id = str(section["id"])
+        title = section.get("title")
+        slide_ids = section.get("slideIds")
+        if not isinstance(title, str) or not title.strip() or title != title.strip():
+            raise WorkflowError(f"Section title is invalid: {section_id}")
+        if not isinstance(slide_ids, list) or (require_slide_ids and not slide_ids) or any(
+            not isinstance(slide_id, str) or not slide_id for slide_id in slide_ids
+        ):
+            raise WorkflowError(f"Section slideIds are invalid: {section_id}")
+        entry = copy.deepcopy(state["sections"].get(section_id, {
+            "title": section_id,
+            "status": "planned",
+            "canonical": "planning",
+            "slideIds": [],
+            "bentoSlideIds": [],
+            "approvalDigest": None,
+            "bentoDocumentRevision": None,
+            "bentoRegistryRevision": None,
+            "bentoSectionDigest": None,
+            "acceptedAt": None,
+        }))
+        if entry["status"] != "planned":
+            raise WorkflowError(f"Cannot replace section after authoring has begun: {section_id}")
+        entry.update(title=title, slideIds=list(slide_ids))
+        configured[section_id] = entry
+    return configured
+
+
 def command_configure_sections(
     root: Path,
     state: dict[str, Any],
@@ -2158,26 +2215,146 @@ def command_configure_sections(
         _require_stage(state, "planning", "awaiting_plan_approval")
         if state.get("schemaVersion") != 2 or state["authoring"]["mode"] not in {"single", "imported"}:
             raise WorkflowError("configure-sections requires schema v2 single/imported authoring")
-        for existing, entry in state["sections"].items():
-            if existing not in values and entry["status"] != "planned":
-                raise WorkflowError(f"Cannot remove section after authoring has begun: {existing}")
-        state["sections"] = {
-            section_id: state["sections"].get(section_id, {
-                "title": section_id,
-                "status": "planned",
-                "canonical": "planning",
-                "slideIds": [],
-                "bentoSlideIds": [],
-                "approvalDigest": None,
-                "bentoDocumentRevision": None,
-                "bentoRegistryRevision": None,
-                "bentoSectionDigest": None,
-                "acceptedAt": None,
-            })
+        state["sections"] = _configured_sections(state, [
+            {
+                "id": section_id,
+                "title": str(state["sections"].get(section_id, {}).get("title") or section_id),
+                "slideIds": list(state["sections"].get(section_id, {}).get("slideIds") or []),
+            }
             for section_id in values
-        }
+        ], require_slide_ids=False)
         atomic_write_state(root, state)
         append_work_log(root, "Configured sections: " + ", ".join(values))
+
+
+def command_apply_planning_proposal(
+    root: Path,
+    state: dict[str, Any],
+    *,
+    candidate_payloads: Mapping[str, bytes],
+    candidate_sections: Sequence[Mapping[str, Any]],
+    expected_base_planning_signature: str,
+    expected_candidate_planning_signature: str,
+    proposal_path: Path,
+    expected_proposal_revision: str,
+    applied_proposal_payload: bytes,
+    inherited_writer_lease: WriterLease | None = None,
+    fault_injector: Callable[[str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Atomically apply one reviewed planning snapshot and its section membership."""
+
+    candidate = validate_planning_candidate(candidate_payloads, candidate_sections)
+    if not hmac.compare_digest(candidate.signature, expected_candidate_planning_signature):
+        raise PlanningRevisionConflict(
+            "Planning Candidateが更新されています。最新の変更案を読み直してください。"
+        )
+    resolved_proposal = proposal_path.resolve()
+    try:
+        proposal_relative = resolved_proposal.relative_to(root.resolve())
+    except ValueError as exc:
+        raise WorkflowError("Planning Proposal metadata must remain inside the repository") from exc
+    parts = proposal_relative.parts
+    if (
+        len(parts) != 4
+        or parts[0] != ".bento-ai"
+        or parts[1] != "runs"
+        or not re.fullmatch(r"[0-9a-f]{32}", parts[2])
+        or parts[3] != "proposal.json"
+        or resolved_proposal.is_symlink()
+    ):
+        raise WorkflowError("Planning Proposal metadata location is invalid")
+    try:
+        applied_value = json.loads(applied_proposal_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError("Applied Planning Proposal metadata is invalid") from exc
+    if not isinstance(applied_value, dict) or applied_value.get("status") != "applied":
+        raise WorkflowError("Applied Planning Proposal metadata must record applied status")
+
+    with planning_action_guard(
+        root, state, inherited_writer_lease=inherited_writer_lease,
+    ) as lease:
+        _require_stage(state, "planning")
+        if state.get("schemaVersion") != 2 or state.get("authoring", {}).get("mode") not in {"single", "imported"}:
+            raise WorkflowError("AI Planning Proposal requires schema v2 single/imported authoring")
+        current_signature = planning_review_signature(root, state)
+        if not hmac.compare_digest(current_signature, expected_base_planning_signature):
+            raise PlanningRevisionConflict(
+                "現在のplanningが変更されています。最新の内容から変更案を作り直してください。"
+            )
+        if file_revision(resolved_proposal) != expected_proposal_revision:
+            raise PlanningRevisionConflict(
+                "Planning Proposalの状態が更新されています。最新の変更案を読み直してください。"
+            )
+
+        next_state = copy.deepcopy(state)
+        section_values = [
+            {"id": section.id, "title": section.title, "slideIds": list(section.slide_ids)}
+            for section in candidate.sections
+        ]
+        next_state["sections"] = _configured_sections(next_state, section_values)
+        validate_state(root, next_state)
+        deck_path = (root / STATE_RELATIVE).resolve()
+        work_log = (root / WORK_LOG_RELATIVE).resolve()
+        planning_targets = {
+            name: (root / PLANNING_ARTIFACT_FILES[name]).resolve()
+            for name in candidate.artifacts
+        }
+        payloads: dict[Path, bytes] = {
+            deck_path: _state_payload(next_state),
+            work_log: _work_log_payload(root, "Applied the reviewed AI Planning Proposal"),
+            resolved_proposal: bytes(applied_proposal_payload),
+            **{
+                planning_targets[name]: payload
+                for name, payload in candidate.artifacts.items()
+            },
+        }
+        store = ArtifactTransactionStore(
+            root,
+            tuple(payloads),
+            inherited_writer_lease=lease,
+            fault_injector=fault_injector,
+        )
+
+        def validate_base() -> None:
+            fresh = load_state(root)
+            if not hmac.compare_digest(
+                planning_review_signature(root, fresh), expected_base_planning_signature,
+            ):
+                raise PlanningRevisionConflict(
+                    "現在のplanningが変更されています。最新の内容から変更案を作り直してください。"
+                )
+            if file_revision(resolved_proposal) != expected_proposal_revision:
+                raise PlanningRevisionConflict(
+                    "Planning Proposalの状態が更新されています。最新の変更案を読み直してください。"
+                )
+            if not hmac.compare_digest(
+                planning_candidate_signature(candidate.artifacts, candidate.sections),
+                expected_candidate_planning_signature,
+            ):
+                raise PlanningRevisionConflict(
+                    "Planning Candidateが更新されています。最新の変更案を読み直してください。"
+                )
+
+        def validate_committed() -> None:
+            installed = load_state(root)
+            validate_planning(root)
+            if installed.get("sections") != next_state.get("sections"):
+                raise WorkflowError("Applied Planning Proposal section state differs after commit")
+            for name, target in planning_targets.items():
+                if target.read_bytes() != candidate.artifacts[name]:
+                    raise WorkflowError("Applied Planning Proposal artifact differs after commit")
+            if resolved_proposal.read_bytes() != applied_proposal_payload:
+                raise WorkflowError("Applied Planning Proposal status differs after commit")
+
+        result = store.commit(
+            payloads,
+            operation="apply-ai-planning-proposal",
+            validate_base=validate_base,
+            validate_committed=validate_committed,
+        )
+        state.clear()
+        state.update(next_state)
+        return result
 
 
 def command_submit_plan(

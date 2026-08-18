@@ -37,7 +37,7 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 ## API境界
 
 - `GET /api/project`, `/api/state`, `/api/slides`: `deck.yaml`をUI向けview modelへ変換します。
-- `GET /api/storyboard`: `REQUEST.md`、3つのplanning文書、任意のvisual plan、section／chapter順を読み取り専用view modelとして返します。
+- `GET /api/storyboard?view=current|candidate`: `REQUEST.md`、3つのplanning文書、visual plan、section順を読み取り専用view modelとして返します。Candidateは未解決のPlanning Proposalがある場合だけ利用できます。
 - `POST /api/storyboard/initialize`: `initialized`で一次資料を確認し、既存の初期化処理へ委譲します。
 - `POST /api/storyboard/submit`: `planning`でplanning文書とsection／chapterが揃っていることを検証し、確認したrevisionのまま構成案を確認待ちにします。
 - `POST /api/storyboard/approve`: `awaiting_plan_approval`で確認したrevisionを再検証し、変化がなければHTML制作へ進めます。
@@ -55,6 +55,11 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 - `POST /api/bento/final/reopen`: 既存の再開処理で最終承認を無効化し、finalization editorを再開します。
 - `GET /api/ai/status`: Codex SDKの利用可否、利用できる操作、実処理段階、失敗理由、再試行可否だけを返します。
 - `POST /api/ai/proposals`: `{ "confirmed": true, "slideId": "...", "action": "shorten", "instruction": "..." }`を受け、確認用のwhole-deck候補を1件だけバックグラウンド生成します。
+- `GET /api/ai/planning/status`: Planning Candidate生成の実処理段階、失敗理由、再試行可否、未解決Proposalの有無を返します。
+- `POST /api/ai/planning/proposals`: `{ "confirmed": true, "instruction": "..." }`を受け、現在のplanning全体を基準に確認用Candidateを1件だけ生成します。
+- `GET /api/ai/planning/proposals/{proposal}`: 人が読むsummary、impact、process-local action tokenだけを返します。
+- `POST /api/ai/planning/proposals/{proposal}/apply`: 明示確認後、固定されたCandidate全体を既存WriterLeaseとtransaction経路でcanonical planningへ反映します。
+- `POST /api/ai/planning/proposals/{proposal}/cancel`: Candidateを破棄し、canonical planningは変更しません。
 
 5つのBento lifecycle POSTはすべて`{ "confirmed": true }`のみを受け付け、`202 Accepted`でバックグラウンド処理を開始します。既知のstage不一致、重複実行、検証できないeditor sessionは`409 Conflict`で拒否します。処理中はAppがstatusを定期取得し、実際の段階と完了数を表示します。
 
@@ -78,6 +83,24 @@ awaiting_plan_approval
 各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenは`deck.yaml`、表示対象の各planning文書、visual plan、section／chapterの順序と状態を、path・有無・byte長・個別SHA-256を持つcanonical recordへ固定したprocess-local値です。提出・承認だけでなく、request、project metadata、section／chapter設定、planning文書の組み込みwriterも同じartifact群のOSレベルwriter leaseを取得します。画面表示後または遷移直前に内容が変わった場合や別processが更新中の場合は`409 Conflict`として`deck.yaml`を変更しません。必要な文書とsection／chapterが揃うまでは提出・承認操作を表示しません。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。Codexなどのオフラインwriterは、固定された4種類だけを扱う`write-planning-artifact`経路を使用します。
 
 承認直後の`html_authoring`でHTMLがまだ存在しない間は「HTMLを準備しています」と表示します。この状態ではHTML review、slide preview、AI Actionsを要求しません。HTMLデザインが既存経路で作成された後に「状態を更新」すると、通常のHTML Design確認へ切り替わります。
+
+### AI Planning Proposal
+
+schema v2の`single`／`imported`かつ`planning`段階では、Inspectorへ自然言語の指示を入力できます。AIは`.bento-ai/runs/<job>/`の隔離領域だけで、次の完全なsnapshotを作成します。
+
+```text
+explanation-policy.md
+story-outline.md
+slide-plan.md
+visual-plan.yaml
+sections + stable slideIds
+```
+
+入力は現在のplanning、request、primary source、必要な仕様だけです。SDKはephemeral、`workspace_write`、network disabled、deny-all approvalで動きます。Candidate登録前にUTF-8、厳密なresult schema、section／slide IDの一意性、slide-planとの一対一対応、visual schemaと全slide IDの一致、許可されたsource reference、入力改変、新しい事実・数値を検証します。
+
+生成後は中央Canvasの`Current`／`Candidate`を切り替え、追加・削除・変更・移動したslide、section変更、説明方針・ストーリー・visual planの影響を確認します。生成だけではcanonical、submit、approve、HTML生成を一切実行しません。「この変更案を反映」を明示した場合だけ、生成元のplanning／request／project state／primary source revision、Candidate signature、Proposal metadataとprocess-local tokenを再確認します。staleまたはtamperedなProposalは`409 Conflict`で拒否します。
+
+Applyは`deck.yaml`、4つのplanning artifact、section／slideIds、work log、Proposal状態を同じcross-process WriterLease下の1 transactionで更新します。途中失敗は全targetをrollbackします。Apply後もstageは`planning`のままで、既存の「構成案を提出」および「この構成を承認」は別の人間操作です。Backend再起動後も登録済みCandidateは再表示でき、実行中に中断されたjobは再試行可能な失敗として復旧します。
 
 ## App内のBento承認フロー
 
@@ -132,4 +155,4 @@ AI Actionsを利用できるのは、`whole_deck`方式の`html_review`で、未
 - AppはWindowsの既存PowerShell launcherでWork editorを起動・停止します。Bento lifecycle操作のeditor連携はWindows専用です。
 - 保存自体は既存Work editorが担当します。React側にBento編集機能は再実装していません。
 - AI ActionsはoptionalなCodex SDK機能です。ネットワークなしの隔離領域で候補だけを生成し、画像生成、Bento直接編集、自動承認、自動反映、自動変換は行いません。
-- Storyboardは今回、確認・提出・承認までの読み取り専用です。App内でplanning文書を編集する機能、スライドの追加・削除・並べ替え、visual plan編集、AIによる構成作成は未実装です。
+- Storyboardの手動直接編集、ドラッグ&ドロップ、persistent chat historyは未実装です。AI Planningは1回の自然言語指示から完全なCandidateを作り、人が全体を確認して明示Applyする経路だけを提供します。

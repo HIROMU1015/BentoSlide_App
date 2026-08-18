@@ -49,4 +49,21 @@ describe('Storyboard stage controls', () => {
     expect(screen.getByText('<img src=x onerror="alert(1)">')).toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
   })
+
+  it('shows the actual Planning AI phase while generation is running', () => {
+    render(<StoryboardInspector
+      storyboard={base}
+      selected={null}
+      busy={true}
+      onAction={vi.fn()}
+      planningAi={{
+        available: true, reason: null, allowedStage: true, status: 'running',
+        phase: 'validating-candidate', message: 'Planning Candidateを検証しています。',
+        error: null, retryable: false, hasProposal: false, proposalId: null,
+      }}
+    />)
+
+    expect(screen.getByRole('status')).toHaveTextContent('変更案の整合性を検証中')
+    expect(screen.getByText('Planning Candidateを検証しています。')).toBeInTheDocument()
+  })
 })

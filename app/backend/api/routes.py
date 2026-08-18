@@ -18,6 +18,10 @@ from app.backend.models.view_models import (
     ConversionStatusResponse,
     HtmlReviewResponse,
     LifecycleStatusResponse,
+    PlanningAiProposalRequest,
+    PlanningAiStatusResponse,
+    PlanningProposalActionRequest,
+    PlanningProposalView,
     ProjectResponse,
     SlidesResponse,
     StateResponse,
@@ -30,6 +34,7 @@ from app.backend.services.ai_proposal_service import AiProposalService
 from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
+from app.backend.services.planning_ai_proposal_service import PlanningAiProposalService
 from app.backend.services.workflow_service import WorkflowService
 from app.backend.services.storyboard_service import StoryboardService
 
@@ -39,6 +44,7 @@ def create_api_router(
     conversion: ConversionService,
     lifecycle: BentoLifecycleService,
     ai: AiProposalService,
+    planning_ai: PlanningAiProposalService,
     storyboard: StoryboardService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
@@ -60,8 +66,11 @@ def create_api_router(
         return workflow.state_view()
 
     @router.get("/storyboard", response_model=StoryboardResponse)
-    def storyboard_view() -> StoryboardResponse:
-        return storyboard.view()
+    def storyboard_view(view: Literal["current", "candidate"] = "current") -> StoryboardResponse:
+        if view == "candidate":
+            candidate, proposal = planning_ai.candidate()
+            return storyboard.view(view=view, candidate=candidate, proposal=proposal)
+        return storyboard.view(view=view, proposal=planning_ai.active_proposal())
 
     @router.post("/storyboard/initialize", response_model=StoryboardResponse)
     def initialize_storyboard(request: StoryboardActionRequest) -> StoryboardResponse:
@@ -69,6 +78,8 @@ def create_api_router(
 
     @router.post("/storyboard/submit", response_model=StoryboardResponse)
     def submit_storyboard(request: StoryboardActionRequest) -> StoryboardResponse:
+        if planning_ai.has_active_proposal():
+            raise WorkflowError("Planning Candidateを反映または破棄してから構成案を提出してください。")
         return storyboard.submit(action_token=request.actionToken)
 
     @router.post("/storyboard/approve", response_model=StoryboardResponse)
@@ -127,6 +138,42 @@ def create_api_router(
             action=request.action,
             instruction=request.instruction,
         )
+
+    @router.get("/ai/planning/status", response_model=PlanningAiStatusResponse)
+    def planning_ai_status() -> PlanningAiStatusResponse:
+        return planning_ai.status()
+
+    @router.post(
+        "/ai/planning/proposals",
+        response_model=PlanningAiStatusResponse,
+        status_code=HTTPStatus.ACCEPTED,
+    )
+    def create_planning_ai_proposal(request: PlanningAiProposalRequest) -> PlanningAiStatusResponse:
+        return planning_ai.start(instruction=request.instruction)
+
+    @router.get(
+        "/ai/planning/proposals/{proposal_id}", response_model=PlanningProposalView,
+    )
+    def planning_ai_proposal(proposal_id: str) -> PlanningProposalView:
+        return planning_ai.proposal(proposal_id)
+
+    @router.post(
+        "/ai/planning/proposals/{proposal_id}/apply", response_model=StoryboardResponse,
+    )
+    def apply_planning_ai_proposal(
+        proposal_id: str, request: PlanningProposalActionRequest,
+    ) -> StoryboardResponse:
+        planning_ai.apply(proposal_id=proposal_id, action_token=request.actionToken)
+        return storyboard.view()
+
+    @router.post(
+        "/ai/planning/proposals/{proposal_id}/cancel", response_model=StoryboardResponse,
+    )
+    def cancel_planning_ai_proposal(
+        proposal_id: str, request: PlanningProposalActionRequest,
+    ) -> StoryboardResponse:
+        planning_ai.cancel(proposal_id=proposal_id, action_token=request.actionToken)
+        return storyboard.view()
 
     @router.post(
         "/bento/content/review", response_model=LifecycleStatusResponse,

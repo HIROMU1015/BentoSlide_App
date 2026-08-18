@@ -1,5 +1,6 @@
 import type {
   AiProposalInput, AiStatus, AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
+  PlanningAiStatus,
   ReviewMark, ReviewMarks, SlideItem, Storyboard, StoryboardAction, StoryboardSlide,
 } from '../types'
 import { BentoLifecyclePanel } from './BentoLifecyclePanel'
@@ -18,6 +19,7 @@ type Props = {
   conversion: ConversionStatus | null
   lifecycle: LifecycleStatus | null
   ai: AiStatus | null
+  planningAi: PlanningAiStatus | null
   storyboard: Storyboard | null
   selectedStoryboardSlide: StoryboardSlide | null
   onSelectSlide: (slideId: string) => void
@@ -31,6 +33,10 @@ type Props = {
   onStartAiProposal: (input: AiProposalInput) => void
   onRetryAiProposal: (input: AiProposalInput) => void
   onStoryboardAction: (action: StoryboardAction) => void
+  onStartPlanningAi: (instruction: string) => void
+  onRetryPlanningAi: (instruction: string) => void
+  onApplyPlanningAi: () => void
+  onCancelPlanningAi: () => void
 }
 
 export function Inspector(props: Props) {
@@ -42,6 +48,11 @@ export function Inspector(props: Props) {
         selected={props.selectedStoryboardSlide}
         busy={props.busy}
         onAction={props.onStoryboardAction}
+        planningAi={props.planningAi}
+        onStartPlanningAi={props.onStartPlanningAi}
+        onRetryPlanningAi={props.onRetryPlanningAi}
+        onApplyPlanningAi={props.onApplyPlanningAi}
+        onCancelPlanningAi={props.onCancelPlanningAi}
       />
     )
   }

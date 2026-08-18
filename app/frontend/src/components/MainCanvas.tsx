@@ -11,6 +11,7 @@ type Props = {
   bento: BentoIntegration | null
   storyboard: Storyboard | null
   onStoryboardSelect: (slideId: string) => void
+  onStoryboardViewChange: (view: 'current' | 'candidate') => void
   transitioning?: boolean
 }
 
@@ -113,6 +114,7 @@ export function MainCanvas(props: Props) {
         storyboard={storyboard}
         selectedSlide={props.selectedSlide}
         onSelect={props.onStoryboardSelect}
+        onViewChange={props.onStoryboardViewChange}
       />
     )
   }

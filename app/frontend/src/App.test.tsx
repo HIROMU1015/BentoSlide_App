@@ -2,10 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import {
-  getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction, startStoryboardAction,
+  applyPlanningAiProposal, cancelPlanningAiProposal, getAiStatus, getConversionStatus,
+  getLifecycleStatus, getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal,
+  startConversion, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
 } from './api/client'
-import type { AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus, Storyboard } from './types'
+import type {
+  AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus,
+  PlanningAiStatus, Storyboard,
+} from './types'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -20,13 +24,18 @@ function deferred<T>() {
 vi.mock('./api/client', () => ({
   applyHtmlChange: vi.fn(),
   approveHtmlDeck: vi.fn(),
+  applyPlanningAiProposal: vi.fn(),
+  cancelPlanningAiProposal: vi.fn(),
   getConversionStatus: vi.fn(),
   getAiStatus: vi.fn(),
   getLifecycleStatus: vi.fn(),
+  getPlanningAiStatus: vi.fn(),
+  getStoryboard: vi.fn(),
   loadAppData: vi.fn(),
   startConversion: vi.fn(),
   startAiProposal: vi.fn(),
   startLifecycleAction: vi.fn(),
+  startPlanningAiProposal: vi.fn(),
   startStoryboardAction: vi.fn(),
 }))
 
@@ -51,6 +60,12 @@ const idleAi: AiStatus = {
   supportedActions: ['shorten', 'add-diagram', 'improve-structure', 'custom'],
   allowedStage: true, status: 'idle', phase: null,
   message: '変更案を作成できます', error: null, retryable: false,
+}
+
+const idlePlanningAi: PlanningAiStatus = {
+  available: true, reason: null, allowedStage: true, status: 'idle', phase: null,
+  message: 'AI Planningを利用できます。', error: null, retryable: false,
+  hasProposal: false, proposalId: null,
 }
 
 const appState: AppState = {
@@ -80,6 +95,8 @@ beforeEach(() => {
   vi.mocked(getConversionStatus).mockResolvedValue(idleConversion)
   vi.mocked(getLifecycleStatus).mockResolvedValue(idleLifecycle)
   vi.mocked(getAiStatus).mockResolvedValue(idleAi)
+  vi.mocked(getPlanningAiStatus).mockResolvedValue(idlePlanningAi)
+  vi.mocked(getStoryboard).mockRejectedValue(new Error('Storyboard view is not configured in this test'))
   vi.mocked(startConversion).mockResolvedValue({
     ...idleConversion,
     status: 'running',
@@ -93,6 +110,11 @@ beforeEach(() => {
   vi.mocked(startAiProposal).mockResolvedValue({
     ...idleAi, status: 'running', phase: 'preparing', message: '準備中',
   })
+  vi.mocked(startPlanningAiProposal).mockResolvedValue({
+    ...idlePlanningAi, status: 'running', phase: 'preparing', message: '準備中',
+  })
+  vi.mocked(applyPlanningAiProposal).mockResolvedValue({} as Storyboard)
+  vi.mocked(cancelPlanningAiProposal).mockResolvedValue({} as Storyboard)
   vi.mocked(loadAppData).mockImplementation(async (view: HtmlView = 'current') => ({
     project: { project: { title: 'Fixture', kind: 'fixture' } },
     state: appState,
@@ -243,6 +265,155 @@ describe('App Storyboard workflow', () => {
     expect(screen.getByText(/構成案は承認済みです/)).toBeInTheDocument()
     expect(getAiStatus).not.toHaveBeenCalled()
     expect(screen.queryByText('AI Actions')).not.toBeInTheDocument()
+  })
+})
+
+describe('App Planning AI proposal workflow', () => {
+  const planningState: AppState = {
+    ...appState, mode: 'storyboard', stage: 'planning', htmlAvailable: false,
+    hasCandidate: false, nextActionLabel: '構成案を確認します',
+  }
+  const proposal = {
+    id: 'a'.repeat(32),
+    status: 'proposed' as const,
+    summary: '方法を2枚に分ける',
+    impactSummary: '方法に詳細スライドを追加します。',
+    impact: {
+      slides: [{
+        id: 'method-2', title: '詳細', change: 'added' as const,
+        previousNumber: null, number: 3,
+      }],
+      sections: [{ id: 'method', title: '方法', change: 'changed' as const }],
+      explanationPolicyChanged: true,
+      storyOutlineChanged: true,
+      slidePlanChanged: true,
+      visualChanges: 1,
+    },
+    actionToken: 'opaque-planning-proposal-action-token',
+  }
+  const currentStoryboard: Storyboard = {
+    view: 'current', proposal: null, stage: 'planning',
+    request: { title: '依頼内容', sections: [] },
+    explanationPolicy: { title: '説明方針', sections: [] },
+    storyOutline: { title: '全体ストーリー', sections: [] },
+    slidePlan: { title: 'スライド構成', sections: [] },
+    sections: [{ id: 'method', title: '方法', slides: [{
+      id: 'method-1', number: 1, title: '方法', points: ['手順'],
+      sectionId: 'method', sectionTitle: '方法', visual: null,
+    }] }],
+    canInitialize: false, canSubmit: true, canApprove: false,
+    nextActionLabel: '提出できます', actionToken: 'opaque-current-storyboard-token',
+  }
+  const proposedCurrent: Storyboard = {
+    ...currentStoryboard, proposal, canSubmit: false,
+    nextActionLabel: '変更案を確認してください',
+  }
+  const candidateStoryboard: Storyboard = {
+    ...proposedCurrent, view: 'candidate',
+    sections: [{ id: 'method', title: '方法', slides: [
+      ...currentStoryboard.sections[0].slides,
+      {
+        id: 'method-2', number: 3, title: '詳細', points: ['詳細を示す'],
+        sectionId: 'method', sectionTitle: '方法', visual: null,
+      },
+    ] }],
+  }
+
+  function planningData(storyboard: Storyboard) {
+    return {
+      project: { project: { title: 'Planning AI Fixture', kind: 'fixture' } },
+      state: planningState,
+      review: null,
+      storyboard,
+      bento: { available: false, editorUrl: null, message: '準備中' },
+      slideView: 'current' as const,
+      slides: storyboard.sections.flatMap((section) => section.slides.map((slide) => ({
+        id: slide.id, title: slide.title, number: slide.number, sectionTitle: section.title,
+      }))),
+    }
+  }
+
+  it('creates a candidate, refreshes current state, and switches the Storyboard comparison', async () => {
+    vi.mocked(loadAppData)
+      .mockResolvedValueOnce(planningData(currentStoryboard))
+      .mockResolvedValue(planningData(proposedCurrent))
+    vi.mocked(startPlanningAiProposal).mockResolvedValue({
+      ...idlePlanningAi, status: 'succeeded', phase: 'succeeded', allowedStage: false,
+      message: '候補を作成しました', hasProposal: true, proposalId: proposal.id,
+    })
+    vi.mocked(getStoryboard).mockResolvedValue(candidateStoryboard)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    const input = await screen.findByPlaceholderText('例: 方法を2枚に分けて、結論を先にしてください')
+    fireEvent.change(input, { target: { value: '方法を2枚に分けてください' } })
+    fireEvent.click(screen.getByRole('button', { name: '変更案を作成' }))
+
+    await waitFor(() => expect(startPlanningAiProposal).toHaveBeenCalledWith('方法を2枚に分けてください'))
+    expect(window.confirm).toHaveBeenCalledWith('現在案を変更せず、Storyboard全体の確認用変更案をAIで作成しますか？')
+    expect(await screen.findByText('方法を2枚に分ける')).toBeInTheDocument()
+    expect(screen.getByText('Slide 3: 詳細')).toBeInTheDocument()
+    expect(screen.getByText('Visual plan: 1件変更')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Candidate' })).toHaveClass('is-active')
+    expect(getStoryboard).toHaveBeenCalledWith('candidate')
+  })
+
+  it('shows failure and retries with the instruction currently entered', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(planningData(currentStoryboard))
+    vi.mocked(getPlanningAiStatus).mockResolvedValue({
+      ...idlePlanningAi, status: 'failed', phase: 'failed',
+      message: '候補を検証できません', error: 'visual planが不整合です', retryable: true,
+    })
+    vi.mocked(startPlanningAiProposal).mockResolvedValue({
+      ...idlePlanningAi, status: 'failed', phase: 'failed',
+      message: '再試行に失敗しました', error: '再試行に失敗しました', retryable: true,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('visual planが不整合です')
+    const input = screen.getByPlaceholderText('例: 方法を2枚に分けて、結論を先にしてください')
+    fireEvent.change(input, { target: { value: '現在の入力を使う' } })
+    fireEvent.click(screen.getByRole('button', { name: '現在の指示で再試行' }))
+
+    await waitFor(() => expect(startPlanningAiProposal).toHaveBeenCalledWith('現在の入力を使う'))
+  })
+
+  it('applies only after confirmation and then reloads the canonical Storyboard', async () => {
+    vi.mocked(loadAppData)
+      .mockResolvedValueOnce(planningData(proposedCurrent))
+      .mockResolvedValue(planningData({ ...candidateStoryboard, view: 'current', proposal: null, canSubmit: true }))
+    vi.mocked(getPlanningAiStatus).mockResolvedValue({
+      ...idlePlanningAi, status: 'succeeded', phase: 'succeeded', allowedStage: false,
+      hasProposal: true, proposalId: proposal.id,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'この変更案を反映' }))
+
+    await waitFor(() => expect(applyPlanningAiProposal).toHaveBeenCalledWith(proposedCurrent))
+    expect(window.confirm).toHaveBeenCalledWith(
+      'このPlanning Candidate全体を現在案へ反映しますか？提出と承認は別途必要です。',
+    )
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+  })
+
+  it('cancels a proposal without applying it', async () => {
+    vi.mocked(loadAppData)
+      .mockResolvedValueOnce(planningData(proposedCurrent))
+      .mockResolvedValue(planningData(currentStoryboard))
+    vi.mocked(getPlanningAiStatus).mockResolvedValue({
+      ...idlePlanningAi, status: 'succeeded', phase: 'succeeded', allowedStage: false,
+      hasProposal: true, proposalId: proposal.id,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'この変更案を破棄' }))
+
+    await waitFor(() => expect(cancelPlanningAiProposal).toHaveBeenCalledWith(proposedCurrent))
+    expect(applyPlanningAiProposal).not.toHaveBeenCalled()
   })
 })
 

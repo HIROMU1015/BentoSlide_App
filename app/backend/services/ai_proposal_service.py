@@ -29,6 +29,7 @@ from scripts.deck_workflow import (
 )
 
 from app.backend.models.view_models import AiAction, AiJobPhase, AiStatusResponse
+from app.backend.services.ai_job_coordinator import RepositoryAiJobCoordinator
 
 
 LOGGER = logging.getLogger(__name__)
@@ -312,9 +313,6 @@ ImpactAnalyzer = Callable[..., HtmlChangeImpact]
 class AiProposalService:
     """Generate one isolated whole-deck candidate, validate it, then register it for review."""
 
-    _active_lock = threading.Lock()
-    _active_repositories: set[str] = set()
-
     def __init__(
         self,
         repository: str | Path,
@@ -342,10 +340,6 @@ class AiProposalService:
             message="AI Actionsの利用可否を確認しています。",
         )
         self._recover_interrupted_job()
-
-    @property
-    def _repository_key(self) -> str:
-        return os.path.normcase(str(self.repository))
 
     def _state(self) -> dict[str, Any]:
         return self._state_loader(self.repository)
@@ -444,10 +438,8 @@ class AiProposalService:
             if slide_id not in outline.ordered_slide_ids:
                 raise WorkflowError("選択されたスライドは現在のHTMLに存在しません")
 
-            with self._active_lock:
-                if self._repository_key in self._active_repositories:
-                    raise WorkflowError("AI候補生成はすでに実行中です")
-                self._active_repositories.add(self._repository_key)
+            if not RepositoryAiJobCoordinator.claim(self.repository):
+                raise WorkflowError("AI候補生成はすでに実行中です")
 
             job_id = uuid.uuid4().hex
             workspace = self._run_root / job_id
@@ -470,8 +462,7 @@ class AiProposalService:
             try:
                 thread.start()
             except BaseException:
-                with self._active_lock:
-                    self._active_repositories.discard(self._repository_key)
+                RepositoryAiJobCoordinator.release(self.repository)
                 self._status = self._failed("AI候補生成を開始できませんでした。", retryable=True)
                 raise
         return self.status()
@@ -554,8 +545,7 @@ class AiProposalService:
             with self._lock:
                 self._status = self._failed(message, retryable=self._allowed_stage())
         finally:
-            with self._active_lock:
-                self._active_repositories.discard(self._repository_key)
+            RepositoryAiJobCoordinator.release(self.repository)
 
     def _prepare_workspace(
         self, workspace: Path, slide_id: str, action: AiAction, instruction: str,

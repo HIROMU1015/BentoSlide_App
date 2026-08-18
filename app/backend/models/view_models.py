@@ -26,6 +26,10 @@ AiJobPhase = Literal[
     "preparing", "running-agent", "validating-candidate", "registering-proposal",
     "succeeded", "failed",
 ]
+PlanningAiJobPhase = Literal[
+    "preparing", "running-agent", "validating-candidate", "registering-proposal",
+    "succeeded", "failed",
+]
 
 
 class ProjectInfo(BaseModel):
@@ -159,6 +163,65 @@ class AiStatusResponse(BaseModel):
     retryable: bool = False
 
 
+class PlanningAiProposalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class PlanningAiStatusResponse(BaseModel):
+    available: bool
+    reason: str | None = None
+    allowedStage: bool
+    status: ConversionState
+    phase: PlanningAiJobPhase | None = None
+    message: str
+    error: str | None = None
+    retryable: bool = False
+    hasProposal: bool = False
+    proposalId: str | None = None
+
+
+class PlanningSlideImpact(BaseModel):
+    id: str
+    title: str
+    change: Literal["changed", "added", "removed", "moved"]
+    previousNumber: int | None = None
+    number: int | None = None
+
+
+class PlanningSectionImpact(BaseModel):
+    id: str
+    title: str
+    change: Literal["changed", "added", "removed"]
+
+
+class PlanningImpact(BaseModel):
+    slides: list[PlanningSlideImpact] = Field(default_factory=list)
+    sections: list[PlanningSectionImpact] = Field(default_factory=list)
+    explanationPolicyChanged: bool
+    storyOutlineChanged: bool
+    slidePlanChanged: bool
+    visualChanges: int = Field(ge=0)
+
+
+class PlanningProposalView(BaseModel):
+    id: str
+    status: Literal["proposed"]
+    summary: str
+    impactSummary: str
+    impact: PlanningImpact
+    actionToken: str = Field(min_length=20, max_length=256)
+
+
+class PlanningProposalActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: Literal[True]
+    actionToken: str = Field(min_length=20, max_length=256)
+
+
 class StoryboardDocumentSection(BaseModel):
     title: str
     paragraphs: list[str] = Field(default_factory=list)
@@ -194,6 +257,8 @@ class StoryboardSection(BaseModel):
 
 
 class StoryboardResponse(BaseModel):
+    view: Literal["current", "candidate"] = "current"
+    proposal: PlanningProposalView | None = None
     stage: str
     request: StoryboardDocument
     explanationPolicy: StoryboardDocument

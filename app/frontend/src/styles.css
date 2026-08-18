@@ -114,6 +114,15 @@ button { color: inherit; }
 .storyboard-document p { margin: 0 0 5px; }
 .storyboard-document ul { margin: 5px 0 0; padding-left: 17px; color: #475569; font-size: 10px; line-height: 1.5; }
 .storyboard-action p { margin-bottom: 0; }
+.planning-ai-panel h3 { margin: 0 0 7px; }
+.planning-ai-panel > p { margin-bottom: 10px; }
+.planning-impact { display: grid; gap: 9px; margin-top: 12px; }
+.planning-impact > strong { font-size: 11px; line-height: 1.45; }
+.planning-impact ul { list-style: none; display: grid; gap: 6px; margin: 0; padding: 0; }
+.planning-impact li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; color: #475569; font-size: 9px; }
+.planning-impact-flags { display: flex; flex-wrap: wrap; gap: 5px; }
+.planning-impact-flags span { padding: 4px 6px; border-radius: 999px; background: var(--candidate-soft); color: #92400e; font-size: 8px; font-weight: 700; }
+.planning-impact .secondary-button { margin-top: -2px; font-size: 10px; }
 .muted { color: var(--muted) !important; }
 .review-progress { margin: 15px 0 7px; display: flex; justify-content: space-between; align-items: center; color: #64748b; font-size: 10px; }
 .review-progress strong { color: #334155; }

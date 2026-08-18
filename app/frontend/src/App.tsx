@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyHtmlChange,
+  applyPlanningAiProposal,
   approveHtmlDeck,
+  cancelPlanningAiProposal,
   getConversionStatus,
   getAiStatus,
   getLifecycleStatus,
+  getPlanningAiStatus,
+  getStoryboard,
   loadAppData,
   startConversion,
   startAiProposal,
   startLifecycleAction,
+  startPlanningAiProposal,
   startStoryboardAction,
 } from './api/client'
 import { Inspector } from './components/Inspector'
@@ -26,6 +31,7 @@ import type {
   HtmlView,
   LifecycleAction,
   LifecycleStatus,
+  PlanningAiStatus,
   ProjectResponse,
   ReviewMark,
   ReviewMarks,
@@ -56,6 +62,7 @@ export default function App() {
   const [conversion, setConversion] = useState<ConversionStatus | null>(null)
   const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null)
   const [ai, setAi] = useState<AiStatus | null>(null)
+  const [planningAi, setPlanningAi] = useState<PlanningAiStatus | null>(null)
   const [selectedSlide, setSelectedSlide] = useState<string | null>(null)
   const [selectedElement] = useState<string | null>(null)
   const [currentMode, setCurrentMode] = useState<AppState['mode'] | null>(null)
@@ -65,23 +72,42 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [lifecycleRequestBusy, setLifecycleRequestBusy] = useState(false)
   const [aiRequestBusy, setAiRequestBusy] = useState(false)
+  const [planningAiRequestBusy, setPlanningAiRequestBusy] = useState(false)
   const [conversionSettling, setConversionSettling] = useState(false)
   const [lifecycleSettling, setLifecycleSettling] = useState(false)
   const [aiSettling, setAiSettling] = useState(false)
+  const [planningAiSettling, setPlanningAiSettling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const mounted = useRef(true)
   const htmlViewRef = useRef<HtmlView>('current')
+  const storyboardViewRef = useRef<'current' | 'candidate'>('current')
   const conversionGeneration = useRef(0)
   const lifecycleGeneration = useRef(0)
   const aiGeneration = useRef(0)
+  const planningAiGeneration = useRef(0)
   const conversionTimer = useRef<number | null>(null)
   const lifecycleTimer = useRef<number | null>(null)
   const aiTimer = useRef<number | null>(null)
+  const planningAiTimer = useRef<number | null>(null)
 
   const refresh = useCallback(async (requestedView?: HtmlView) => {
     try {
       const data = await loadAppData(requestedView ?? htmlViewRef.current)
+      if (!mounted.current) return
+      if (
+        data.state.mode === 'storyboard'
+        && storyboardViewRef.current === 'candidate'
+        && data.storyboard?.proposal
+      ) {
+        const candidate = await getStoryboard('candidate')
+        data.storyboard = candidate
+        data.slides = candidate.sections.flatMap((section) => section.slides.map((slide) => ({
+          id: slide.id, title: slide.title, number: slide.number, sectionTitle: section.title,
+        })))
+      } else if (data.state.mode === 'storyboard') {
+        storyboardViewRef.current = 'current'
+      }
       if (!mounted.current) return
       setProject(data.project)
       setState(data.state)
@@ -109,6 +135,28 @@ export default function App() {
     setHtmlView(view)
     void refresh(view)
   }, [refresh])
+
+  const chooseStoryboardView = useCallback((view: 'current' | 'candidate') => {
+    storyboardViewRef.current = view
+    setError(null)
+    void getStoryboard(view)
+      .then((value) => {
+        if (!mounted.current) return
+        const storyboardSlides = value.sections.flatMap((section) => section.slides.map((slide) => ({
+          id: slide.id,
+          title: slide.title,
+          number: slide.number,
+          sectionTitle: section.title,
+        })))
+        setStoryboard(value)
+        setSlides(storyboardSlides)
+        setSelectedSlide((selected) => (
+          selected && storyboardSlides.some((slide) => slide.id === selected)
+            ? selected : storyboardSlides[0]?.id ?? null
+        ))
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+  }, [])
 
   const trackConversion = useCallback((initial: ConversionStatus) => {
     const generation = ++conversionGeneration.current
@@ -224,6 +272,47 @@ export default function App() {
     void accept(initial)
   }, [refresh])
 
+  const trackPlanningAi = useCallback((initial: PlanningAiStatus) => {
+    const generation = ++planningAiGeneration.current
+    if (planningAiTimer.current !== null) window.clearTimeout(planningAiTimer.current)
+
+    const accept = async (result: PlanningAiStatus) => {
+      if (!mounted.current || generation !== planningAiGeneration.current) return
+      if (result.status === 'running') {
+        setPlanningAiSettling(false)
+        setPlanningAi(result)
+        planningAiTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+        return
+      }
+      setPlanningAiSettling(true)
+      setPlanningAi(result)
+      const refreshed = await refresh()
+      if (!mounted.current || generation !== planningAiGeneration.current) return
+      if (!refreshed) {
+        planningAiTimer.current = window.setTimeout(() => void accept(result), POLL_DELAY_MS)
+        return
+      }
+      if (result.status === 'succeeded' && result.hasProposal) {
+        setNotice('AIのPlanning Candidateを作成しました。現在案はまだ変更していません。')
+        chooseStoryboardView('candidate')
+      }
+      setPlanningAiSettling(false)
+    }
+
+    async function poll() {
+      try {
+        const result = await getPlanningAiStatus()
+        await accept(result)
+      } catch (reason) {
+        if (!mounted.current || generation !== planningAiGeneration.current) return
+        setError(reason instanceof Error ? reason.message : String(reason))
+        planningAiTimer.current = window.setTimeout(() => void poll(), POLL_DELAY_MS)
+      }
+    }
+
+    void accept(initial)
+  }, [chooseStoryboardView, refresh])
+
   useEffect(() => {
     mounted.current = true
     void refresh()
@@ -238,9 +327,11 @@ export default function App() {
       conversionGeneration.current += 1
       lifecycleGeneration.current += 1
       aiGeneration.current += 1
+      planningAiGeneration.current += 1
       if (conversionTimer.current !== null) window.clearTimeout(conversionTimer.current)
       if (lifecycleTimer.current !== null) window.clearTimeout(lifecycleTimer.current)
       if (aiTimer.current !== null) window.clearTimeout(aiTimer.current)
+      if (planningAiTimer.current !== null) window.clearTimeout(planningAiTimer.current)
     }
   }, [refresh, trackAi, trackConversion, trackLifecycle])
 
@@ -255,6 +346,18 @@ export default function App() {
       .then((result) => result.status === 'running' ? trackAi(result) : setAi(result))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [state?.mode, state?.htmlAvailable, trackAi])
+
+  useEffect(() => {
+    if (state?.mode !== 'storyboard' || state.stage !== 'planning') {
+      planningAiGeneration.current += 1
+      if (planningAiTimer.current !== null) window.clearTimeout(planningAiTimer.current)
+      setPlanningAi(null)
+      return
+    }
+    void getPlanningAiStatus()
+      .then((result) => result.status === 'running' ? trackPlanningAi(result) : setPlanningAi(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+  }, [state?.mode, state?.stage, trackPlanningAi])
 
   useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
@@ -371,6 +474,42 @@ export default function App() {
     handleAiProposal(input)
   }
 
+  const handlePlanningAiProposal = (instruction: string) => {
+    if (!window.confirm('現在案を変更せず、Storyboard全体の確認用変更案をAIで作成しますか？')) return
+    setPlanningAiRequestBusy(true)
+    setPlanningAiSettling(true)
+    setError(null)
+    setNotice(null)
+    void startPlanningAiProposal(instruction)
+      .then(trackPlanningAi)
+      .catch((reason) => {
+        setPlanningAiSettling(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+      .finally(() => setPlanningAiRequestBusy(false))
+  }
+
+  const handleApplyPlanningAi = () => {
+    if (!storyboard?.proposal) return
+    if (!window.confirm('このPlanning Candidate全体を現在案へ反映しますか？提出と承認は別途必要です。')) return
+    void runAction(
+      async () => {
+        await applyPlanningAiProposal(storyboard)
+        setPlanningAi(await getPlanningAiStatus())
+      },
+      'Planning Candidateを現在案へ反映しました。提出と承認はまだ行っていません。',
+    )
+  }
+
+  const handleCancelPlanningAi = () => {
+    if (!storyboard?.proposal) return
+    if (!window.confirm('このPlanning Candidateを破棄しますか？現在案は変更されません。')) return
+    void runAction(async () => {
+      await cancelPlanningAiProposal(storyboard)
+      setPlanningAi(await getPlanningAiStatus())
+    }, 'Planning Candidateを破棄しました。')
+  }
+
   const handleStoryboardAction = (action: StoryboardAction) => {
     if (!storyboard || busy) return
     const prompts: Record<StoryboardAction, string> = {
@@ -391,7 +530,8 @@ export default function App() {
   const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running' || lifecycleSettling
   const conversionTransitioning = conversion?.status === 'running' || conversionSettling
   const aiTransitioning = aiRequestBusy || ai?.status === 'running' || aiSettling
-  const processing = busy || lifecycleTransitioning || conversionTransitioning || aiTransitioning
+  const planningAiTransitioning = planningAiRequestBusy || planningAi?.status === 'running' || planningAiSettling
+  const processing = busy || lifecycleTransitioning || conversionTransitioning || aiTransitioning || planningAiTransitioning
 
   if (!project || !state) {
     return (
@@ -404,7 +544,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell" data-mode={currentMode ?? state.mode} data-has-proposal={Boolean(currentProposal)}>
+    <div className="app-shell" data-mode={currentMode ?? state.mode} data-has-proposal={Boolean(currentProposal || storyboard?.proposal)}>
       <header className="app-header">
         <div className="brand">
           <div className="brand-mark">B</div>
@@ -429,6 +569,7 @@ export default function App() {
           bento={bento}
           storyboard={storyboard}
           onStoryboardSelect={setSelectedSlide}
+          onStoryboardViewChange={chooseStoryboardView}
           transitioning={lifecycleTransitioning || conversionTransitioning}
         />
         <Inspector
@@ -441,6 +582,7 @@ export default function App() {
           conversion={conversion}
           lifecycle={lifecycle}
           ai={ai}
+          planningAi={planningAi}
           storyboard={storyboard}
           selectedStoryboardSlide={selectedStoryboardSlide}
           onSelectSlide={setSelectedSlide}
@@ -454,6 +596,10 @@ export default function App() {
           onStartAiProposal={handleAiProposal}
           onRetryAiProposal={handleRetryAiProposal}
           onStoryboardAction={handleStoryboardAction}
+          onStartPlanningAi={handlePlanningAiProposal}
+          onRetryPlanningAi={handlePlanningAiProposal}
+          onApplyPlanningAi={handleApplyPlanningAi}
+          onCancelPlanningAi={handleCancelPlanningAi}
         />
       </div>
 

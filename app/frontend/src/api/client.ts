@@ -8,6 +8,7 @@ import type {
   HtmlView,
   LifecycleAction,
   LifecycleStatus,
+  PlanningAiStatus,
   ProjectResponse,
   SlideItem,
   Storyboard,
@@ -41,7 +42,7 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
     request<AppState>('/api/state'),
     request<BentoIntegration>('/api/bento'),
   ])
-  const storyboard = state.mode === 'storyboard' ? await request<Storyboard>('/api/storyboard') : null
+  const storyboard = state.mode === 'storyboard' ? await getStoryboard('current') : null
   const review = state.mode === 'html-design' && state.htmlAvailable
     ? await request<HtmlReview>('/api/html/review')
     : null
@@ -58,6 +59,10 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
       ? (await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)).slides
       : []
   return { project, state, slides, review, storyboard, slideView, bento }
+}
+
+export function getStoryboard(view: 'current' | 'candidate' = 'current') {
+  return request<Storyboard>(view === 'current' ? '/api/storyboard' : '/api/storyboard?view=candidate')
 }
 
 const storyboardEndpoints: Record<StoryboardAction, string> = {
@@ -111,6 +116,33 @@ export function startAiProposal(input: AiProposalInput) {
   return request<AiStatus>('/api/ai/proposals', {
     method: 'POST',
     body: JSON.stringify({ confirmed: true, ...input }),
+  })
+}
+
+export function getPlanningAiStatus() {
+  return request<PlanningAiStatus>('/api/ai/planning/status')
+}
+
+export function startPlanningAiProposal(instruction: string) {
+  return request<PlanningAiStatus>('/api/ai/planning/proposals', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, instruction }),
+  })
+}
+
+export function applyPlanningAiProposal(storyboard: Storyboard) {
+  if (!storyboard.proposal) throw new Error('Planning Proposalがありません')
+  return request<Storyboard>(`/api/ai/planning/proposals/${storyboard.proposal.id}/apply`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, actionToken: storyboard.proposal.actionToken }),
+  })
+}
+
+export function cancelPlanningAiProposal(storyboard: Storyboard) {
+  if (!storyboard.proposal) throw new Error('Planning Proposalがありません')
+  return request<Storyboard>(`/api/ai/planning/proposals/${storyboard.proposal.id}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, actionToken: storyboard.proposal.actionToken }),
   })
 }
 

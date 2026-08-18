@@ -4,15 +4,35 @@ type Props = {
   storyboard: Storyboard
   selectedSlide: string | null
   onSelect: (slideId: string) => void
+  onViewChange: (view: 'current' | 'candidate') => void
 }
 
-export function StoryboardCanvas({ storyboard, selectedSlide, onSelect }: Props) {
+export function StoryboardCanvas({ storyboard, selectedSlide, onSelect, onViewChange }: Props) {
   const hasSlides = storyboard.sections.some((section) => section.slides.length > 0)
   return (
     <section className="main-canvas storyboard-canvas" aria-label="Storyboard確認">
       <div className="canvas-toolbar">
-        <strong>構成案</strong>
-        <span className="view-label">読み取り専用</span>
+        <div className="view-switch" role="group" aria-label="表示する構成案">
+          <button
+            type="button"
+            className={storyboard.view !== 'candidate' ? 'current is-active' : 'current'}
+            onClick={() => onViewChange('current')}
+          >
+            Current
+          </button>
+          {storyboard.proposal && (
+            <button
+              type="button"
+              className={storyboard.view === 'candidate' ? 'candidate is-active' : 'candidate'}
+              onClick={() => onViewChange('candidate')}
+            >
+              Candidate
+            </button>
+          )}
+        </div>
+        <span className={`view-label ${storyboard.view ?? 'current'}`}>
+          {storyboard.view === 'candidate' ? '変更案を表示中' : '現在案を表示中'}
+        </span>
       </div>
       <div className="storyboard-scroll">
         {!hasSlides && (

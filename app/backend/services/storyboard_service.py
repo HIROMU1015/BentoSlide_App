@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bento_converter.errors import BentoConverterError
+from bento_converter.planning_proposal import PlanningCandidate
 from bento_converter.visual_planning import load_visual_plan
 from scripts.deck_workflow import (
     PLAN_FILES,
@@ -31,6 +32,7 @@ from app.backend.models.view_models import (
     StoryboardSection,
     StoryboardSlide,
     StoryboardVisual,
+    PlanningProposalView,
 )
 
 
@@ -199,6 +201,18 @@ class StoryboardService:
         except BentoConverterError:
             return []
 
+    @staticmethod
+    def _visual(visual_entry: dict[str, Any] | None) -> StoryboardVisual | None:
+        if not visual_entry:
+            return None
+        visual_value = visual_entry["visual"]
+        return StoryboardVisual(
+            recommended=bool(visual_value["recommended"]),
+            type=str(visual_value["type"]),
+            intent=str(visual_value.get("intent")) if visual_value.get("intent") else None,
+            purpose=str(visual_entry.get("purpose")) if visual_entry.get("purpose") else None,
+        )
+
     def _sections(self, state: dict[str, Any], slide_plan_text: str) -> list[StoryboardSection]:
         parsed = _slide_plan_sections(slide_plan_text)
         visuals = self._visuals()
@@ -231,18 +245,6 @@ class StoryboardService:
                 if fallback is not None:
                     used_indices.add(fallback)
 
-        def visual_for(slide_id: str) -> StoryboardVisual | None:
-            visual_entry = visual_by_id.get(slide_id)
-            if not visual_entry:
-                return None
-            visual_value = visual_entry["visual"]
-            return StoryboardVisual(
-                recommended=bool(visual_value["recommended"]),
-                type=str(visual_value["type"]),
-                intent=str(visual_value.get("intent")) if visual_value.get("intent") else None,
-                purpose=str(visual_entry.get("purpose")) if visual_entry.get("purpose") else None,
-            )
-
         result: list[StoryboardSection] = []
         for unit_index, (unit_id, entry_value) in enumerate(unit_items):
             entry = entry_value if isinstance(entry_value, dict) else {}
@@ -263,7 +265,7 @@ class StoryboardService:
                     points=parsed_slide.points,
                     sectionId=str(unit_id),
                     sectionTitle=section_title,
-                    visual=visual_for(slide_id),
+                    visual=self._visual(visual_by_id.get(slide_id)),
                 ))
             result.append(StoryboardSection(
                 id=str(unit_id),
@@ -280,19 +282,61 @@ class StoryboardService:
                 slides.append(StoryboardSlide(
                     id=slide_id, number=parsed_slide.number, title=parsed_slide.title,
                     points=parsed_slide.points, sectionId=item.identifier, sectionTitle=item.identifier,
-                    visual=visual_for(slide_id),
+                    visual=self._visual(visual_by_id.get(slide_id)),
                 ))
             result.append(StoryboardSection(id=item.identifier, title=item.identifier, slides=slides))
         return result
 
-    def view(self) -> StoryboardResponse:
+    def _candidate_sections(self, candidate: PlanningCandidate) -> list[StoryboardSection]:
+        visual_by_id = {
+            str(entry["id"]): entry for entry in candidate.visual_plan["slides"]
+        }
+        slide_by_id = {slide.id: slide for slide in candidate.slides}
+        return [
+            StoryboardSection(
+                id=section.id,
+                title=section.title,
+                slides=[
+                    StoryboardSlide(
+                        id=slide_by_id[slide_id].id,
+                        number=slide_by_id[slide_id].number,
+                        title=slide_by_id[slide_id].title,
+                        points=list(slide_by_id[slide_id].points),
+                        sectionId=section.id,
+                        sectionTitle=section.title,
+                        visual=self._visual(visual_by_id.get(slide_id)),
+                    )
+                    for slide_id in section.slide_ids
+                ],
+            )
+            for section in candidate.sections
+        ]
+
+    def view(
+        self,
+        *,
+        view: str = "current",
+        candidate: PlanningCandidate | None = None,
+        proposal: PlanningProposalView | None = None,
+    ) -> StoryboardResponse:
+        if view not in {"current", "candidate"}:
+            raise WorkflowError("Storyboard view is invalid")
+        if view == "candidate" and candidate is None:
+            raise WorkflowError("確認できるPlanning Candidateはありません")
         state = self._state_loader(self.repository)
         stage = str(state["workflow"]["stage"])
         request_relative = state.get("project", {}).get("request")
         request_text = _read_optional_text(self._artifact_path(request_relative)) if isinstance(request_relative, str) and request_relative else ""
-        explanation = _read_optional_text(self._artifact_path(PLAN_FILES["explanationPolicy"]))
-        story = _read_optional_text(self._artifact_path(PLAN_FILES["storyOutline"]))
-        slide_plan = _read_optional_text(self._artifact_path(PLAN_FILES["slidePlan"]))
+        if candidate is None:
+            explanation = _read_optional_text(self._artifact_path(PLAN_FILES["explanationPolicy"]))
+            story = _read_optional_text(self._artifact_path(PLAN_FILES["storyOutline"]))
+            slide_plan = _read_optional_text(self._artifact_path(PLAN_FILES["slidePlan"]))
+            sections = self._sections(state, slide_plan)
+        else:
+            explanation = candidate.texts["explanation-policy"]
+            story = candidate.texts["story-outline"]
+            slide_plan = candidate.texts["slide-plan"]
+            sections = self._candidate_sections(candidate)
         ready = planning_is_ready(self.repository, state)
         next_actions = {
             "initialized": "資料を確認して構成作成を開始します。",
@@ -300,17 +344,24 @@ class StoryboardService:
             "awaiting_plan_approval": "構成案を確認し、明示的な承認後にHTML制作へ進みます。",
             "html_authoring": "構成案は承認済みです。HTMLデザインの準備を待っています。",
         }
+        has_pending_proposal = proposal is not None
         return StoryboardResponse(
+            view=view,
+            proposal=proposal,
             stage=stage,
             request=_document(request_text, fallback_title="依頼内容"),
             explanationPolicy=_document(explanation, fallback_title="説明方針"),
             storyOutline=_document(story, fallback_title="全体ストーリー"),
             slidePlan=_document(slide_plan, fallback_title="スライド構成"),
-            sections=self._sections(state, slide_plan),
-            canInitialize=stage == "initialized",
-            canSubmit=stage == "planning" and ready,
-            canApprove=stage == "awaiting_plan_approval" and ready,
-            nextActionLabel=next_actions.get(stage, "Storyboardの確認操作は完了しています。"),
+            sections=sections,
+            canInitialize=stage == "initialized" and not has_pending_proposal,
+            canSubmit=stage == "planning" and ready and not has_pending_proposal,
+            canApprove=stage == "awaiting_plan_approval" and ready and not has_pending_proposal,
+            nextActionLabel=(
+                "CurrentとCandidateを比較し、変更案を反映または破棄してください。"
+                if has_pending_proposal else
+                next_actions.get(stage, "Storyboardの確認操作は完了しています。")
+            ),
             actionToken=self._action_token(state),
         )
 

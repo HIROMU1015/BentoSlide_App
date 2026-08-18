@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction, startStoryboardAction,
+  applyPlanningAiProposal, cancelPlanningAiProposal, getAiStatus, getConversionStatus,
+  getLifecycleStatus, getPlanningAiStatus, getStoryboard, loadAppData, startAiProposal,
+  startConversion, startLifecycleAction, startPlanningAiProposal, startStoryboardAction,
 } from './client'
 import type { AppState, HtmlReview, Storyboard } from '../types'
 
@@ -106,6 +107,50 @@ describe('AI proposal API client', () => {
       body: JSON.stringify({ confirmed: true, slideId: 's1', action: 'shorten', instruction: '簡潔に' }),
     }))
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/ai/status', expect.anything())
+  })
+})
+
+describe('Planning AI proposal API client', () => {
+  it('uses the polling, candidate, apply, and cancel endpoints with explicit confirmation', async () => {
+    const proposal = {
+      id: 'a'.repeat(32), status: 'proposed' as const, summary: '変更', impactSummary: '1枚追加',
+      impact: {
+        slides: [], sections: [], explanationPolicyChanged: false,
+        storyOutlineChanged: false, slidePlanChanged: true, visualChanges: 1,
+      },
+      actionToken: 'opaque-planning-proposal-token',
+    }
+    const storyboard = {
+      view: 'candidate' as const, proposal, stage: 'planning',
+      request: { title: '依頼', sections: [] }, explanationPolicy: { title: '方針', sections: [] },
+      storyOutline: { title: '流れ', sections: [] }, slidePlan: { title: '構成', sections: [] },
+      sections: [], canInitialize: false, canSubmit: false, canApprove: false,
+      nextActionLabel: '確認', actionToken: 'opaque-storyboard-token-value',
+    }
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => storyboard }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startPlanningAiProposal('方法を分ける')
+    await getPlanningAiStatus()
+    await getStoryboard('candidate')
+    await applyPlanningAiProposal(storyboard)
+    await cancelPlanningAiProposal(storyboard)
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/ai/planning/proposals', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ confirmed: true, instruction: '方法を分ける' }),
+    }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/ai/planning/status', expect.anything())
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/storyboard?view=candidate', expect.anything())
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4, `/api/ai/planning/proposals/${proposal.id}/apply`, expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ confirmed: true, actionToken: proposal.actionToken }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      5, `/api/ai/planning/proposals/${proposal.id}/cancel`, expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ confirmed: true, actionToken: proposal.actionToken }),
+      }),
+    )
   })
 })
 

@@ -1,10 +1,16 @@
-import type { Storyboard, StoryboardAction, StoryboardDocument, StoryboardSlide } from '../types'
+import type { PlanningAiStatus, Storyboard, StoryboardAction, StoryboardDocument, StoryboardSlide } from '../types'
+import { PlanningAiPanel } from './PlanningAiPanel'
 
 type Props = {
   storyboard: Storyboard
   selected: StoryboardSlide | null
   busy: boolean
   onAction: (action: StoryboardAction) => void
+  planningAi?: PlanningAiStatus | null
+  onStartPlanningAi?: (instruction: string) => void
+  onRetryPlanningAi?: (instruction: string) => void
+  onApplyPlanningAi?: () => void
+  onCancelPlanningAi?: () => void
 }
 
 function DocumentView({ document }: { document: StoryboardDocument }) {
@@ -24,7 +30,11 @@ function DocumentView({ document }: { document: StoryboardDocument }) {
   )
 }
 
-export function StoryboardInspector({ storyboard, selected, busy, onAction }: Props) {
+export function StoryboardInspector({
+  storyboard, selected, busy, onAction, planningAi = null,
+  onStartPlanningAi = () => undefined, onRetryPlanningAi = () => undefined,
+  onApplyPlanningAi = () => undefined, onCancelPlanningAi = () => undefined,
+}: Props) {
   const action = storyboard.canInitialize
     ? { id: 'initialize' as const, label: '構成作成を開始' }
     : storyboard.canSubmit
@@ -62,6 +72,17 @@ export function StoryboardInspector({ storyboard, selected, busy, onAction }: Pr
         <summary>{storyboard.slidePlan.title}</summary>
         <DocumentView document={storyboard.slidePlan} />
       </details>
+      {(storyboard.proposal || (planningAi && (storyboard.stage === 'planning' || planningAi.status === 'running'))) && (
+        <PlanningAiPanel
+          storyboard={storyboard}
+          status={planningAi}
+          disabled={busy}
+          onStart={onStartPlanningAi}
+          onRetry={onRetryPlanningAi}
+          onApply={onApplyPlanningAi}
+          onCancel={onCancelPlanningAi}
+        />
+      )}
       <section className="inspector-section storyboard-action">
         <div className="section-kicker">次の操作</div>
         <p>{storyboard.nextActionLabel}</p>

@@ -121,6 +121,8 @@ export type StoryboardSection = {
 }
 
 export type Storyboard = {
+  view?: 'current' | 'candidate'
+  proposal?: PlanningProposal | null
   stage: string
   request: StoryboardDocument
   explanationPolicy: StoryboardDocument
@@ -135,6 +137,57 @@ export type Storyboard = {
 }
 
 export type StoryboardAction = 'initialize' | 'submit' | 'approve'
+
+export type PlanningAiJobPhase =
+  | 'preparing'
+  | 'running-agent'
+  | 'validating-candidate'
+  | 'registering-proposal'
+  | 'succeeded'
+  | 'failed'
+
+export type PlanningAiStatus = {
+  available: boolean
+  reason: string | null
+  allowedStage: boolean
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  phase: PlanningAiJobPhase | null
+  message: string
+  error: string | null
+  retryable: boolean
+  hasProposal: boolean
+  proposalId: string | null
+}
+
+export type PlanningSlideImpact = {
+  id: string
+  title: string
+  change: 'changed' | 'added' | 'removed' | 'moved'
+  previousNumber: number | null
+  number: number | null
+}
+
+export type PlanningSectionImpact = {
+  id: string
+  title: string
+  change: 'changed' | 'added' | 'removed'
+}
+
+export type PlanningProposal = {
+  id: string
+  status: 'proposed'
+  summary: string
+  impactSummary: string
+  impact: {
+    slides: PlanningSlideImpact[]
+    sections: PlanningSectionImpact[]
+    explanationPolicyChanged: boolean
+    storyOutlineChanged: boolean
+    slidePlanChanged: boolean
+    visualChanges: number
+  }
+  actionToken: string
+}
 
 export type ReviewSlide = {
   id: string
