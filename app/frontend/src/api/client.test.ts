@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction,
+  startConversion, startLifecycleAction, startStoryboardAction,
 } from './client'
-import type { AppState, HtmlReview } from '../types'
+import type { AppState, HtmlReview, Storyboard } from '../types'
 
 const state: AppState = {
   mode: 'html-design',
@@ -11,6 +11,7 @@ const state: AppState = {
   statusLabel: 'Reviewing HTML',
   nextActionLabel: 'Review the candidate',
   canConvert: false,
+  htmlAvailable: true,
   canEditBento: false,
   hasCandidate: true,
   isBlocked: false,
@@ -127,5 +128,80 @@ describe('loadAppData', () => {
     expect(result.slideView).toBe('current')
     expect(result.slides[0]?.id).toBe('current-slide')
     expect(fetchMock).toHaveBeenCalledWith('/api/slides?view=current', expect.anything())
+  })
+
+  it('loads Storyboard without requesting HTML review or slide APIs', async () => {
+    const storyboard: Storyboard = {
+      stage: 'planning',
+      request: { title: '依頼内容', sections: [] },
+      explanationPolicy: { title: '説明方針', sections: [] },
+      storyOutline: { title: '全体ストーリー', sections: [] },
+      slidePlan: { title: 'スライド構成', sections: [] },
+      sections: [{ id: 'main', title: 'Main', slides: [{
+        id: 's1', number: 1, title: '背景', points: ['課題'], sectionId: 'main', sectionTitle: 'Main', visual: null,
+      }] }],
+      canInitialize: false, canSubmit: true, canApprove: false,
+      nextActionLabel: '提出します', actionToken: 'storyboard-action-token-is-opaque',
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const payload = url === '/api/project'
+        ? { project: { title: 'Fixture', kind: 'fixture' } }
+        : url === '/api/state'
+          ? { ...state, mode: 'storyboard', stage: 'planning', htmlAvailable: false }
+          : url === '/api/bento'
+            ? { available: false, editorUrl: null, message: '準備中' }
+            : storyboard
+      return { ok: true, json: async () => payload } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await loadAppData()
+
+    expect(result.storyboard).toEqual(storyboard)
+    expect(result.slides).toEqual([{ id: 's1', number: 1, title: '背景', sectionTitle: 'Main' }])
+    expect(fetchMock).toHaveBeenCalledWith('/api/storyboard', expect.anything())
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain('/api/html/review')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/slides'))).toBe(false)
+  })
+
+  it('keeps approved Storyboard usable while HTML is not created yet', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const payload = url === '/api/project'
+        ? { project: { title: 'Fixture', kind: 'fixture' } }
+        : url === '/api/state'
+          ? { ...state, mode: 'html-design', stage: 'html_authoring', htmlAvailable: false }
+          : { available: false, editorUrl: null, message: '準備中' }
+      return { ok: true, json: async () => payload } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await loadAppData()
+
+    expect(result.review).toBeNull()
+    expect(result.slides).toEqual([])
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain('/api/html/review')
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/slides'))).toBe(false)
+  })
+})
+
+describe('Storyboard API client', () => {
+  it('posts explicit confirmation with only the opaque action token', async () => {
+    const storyboard = {
+      stage: 'planning', request: { title: '依頼', sections: [] },
+      explanationPolicy: { title: '方針', sections: [] }, storyOutline: { title: '流れ', sections: [] },
+      slidePlan: { title: '構成', sections: [] }, sections: [], canInitialize: false, canSubmit: true,
+      canApprove: false, nextActionLabel: '提出', actionToken: 'opaque-storyboard-token-value',
+    } satisfies Storyboard
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => storyboard }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startStoryboardAction('submit', storyboard)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/storyboard/submit', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true, actionToken: storyboard.actionToken }),
+    }))
   })
 })

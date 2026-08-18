@@ -1,11 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import {
   getAiStatus, getConversionStatus, getLifecycleStatus, loadAppData, startAiProposal,
-  startConversion, startLifecycleAction,
+  startConversion, startLifecycleAction, startStoryboardAction,
 } from './api/client'
-import type { AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus } from './types'
+import type { AiStatus, AppState, ConversionStatus, HtmlReview, HtmlView, LifecycleStatus, Storyboard } from './types'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -27,6 +27,7 @@ vi.mock('./api/client', () => ({
   startConversion: vi.fn(),
   startAiProposal: vi.fn(),
   startLifecycleAction: vi.fn(),
+  startStoryboardAction: vi.fn(),
 }))
 
 const idleConversion: ConversionStatus = {
@@ -58,6 +59,7 @@ const appState: AppState = {
   statusLabel: 'Reviewing HTML',
   nextActionLabel: 'Review the candidate',
   canConvert: false,
+  htmlAvailable: true,
   canEditBento: false,
   hasCandidate: true,
   isBlocked: false,
@@ -123,6 +125,124 @@ describe('App candidate navigation', () => {
     await screen.findByText('Candidate slide')
     await waitFor(() => expect(loadAppData).toHaveBeenCalledWith('candidate'))
     expect(screen.queryByText('Current slide')).not.toBeInTheDocument()
+  })
+})
+
+describe('App Storyboard workflow', () => {
+  const storyboard: Storyboard = {
+    stage: 'planning',
+    request: { title: '依頼内容', sections: [{ title: '概要', paragraphs: ['研究内容を明確に伝える'], bullets: [] }] },
+    explanationPolicy: { title: '説明方針', sections: [{ title: '方針', paragraphs: ['専門語を先に定義する'], bullets: [] }] },
+    storyOutline: { title: '全体ストーリー', sections: [{ title: '流れ', paragraphs: ['背景から方法へ進む'], bullets: [] }] },
+    slidePlan: { title: 'スライド構成', sections: [{ title: '構成', paragraphs: [], bullets: ['背景', '方法'] }] },
+    sections: [
+      { id: 'intro', title: '導入', slides: [{
+        id: 's1', number: 1, title: '背景', points: ['課題を示す'], sectionId: 'intro', sectionTitle: '導入',
+        visual: { recommended: true, type: 'native-diagram', intent: '課題と目的を結ぶ', purpose: '関係を示す' },
+      }] },
+      { id: 'method', title: '方法', slides: [{
+        id: 's2', number: 2, title: '解析手順', points: ['手順を示す'], sectionId: 'method', sectionTitle: '方法', visual: null,
+      }] },
+    ],
+    canInitialize: false, canSubmit: true, canApprove: false,
+    nextActionLabel: '構成案を確認して提出します。', actionToken: 'opaque-storyboard-action-token',
+  }
+  const storyboardState: AppState = {
+    ...appState, mode: 'storyboard', stage: 'planning', htmlAvailable: false,
+    hasCandidate: false, nextActionLabel: '構成案を確認します',
+  }
+  const storyboardData = {
+    project: { project: { title: 'Storyboard Fixture', kind: 'fixture' } },
+    state: storyboardState,
+    review: null,
+    storyboard,
+    bento: { available: false, editorUrl: null, message: '準備中' },
+    slideView: 'current' as const,
+    slides: [
+      { id: 's1', title: '背景', number: 1, sectionTitle: '導入' },
+      { id: 's2', title: '解析手順', number: 2, sectionTitle: '方法' },
+    ],
+  }
+
+  it('renders ordered cards, synchronizes selection, and exposes only the stage action', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(storyboardData)
+    render(<App />)
+
+    const navigator = await screen.findByRole('navigation', { name: 'Storyboard一覧' })
+    const introduction = within(navigator).getByText('導入')
+    const method = within(navigator).getByText('方法')
+    expect(introduction.compareDocumentPosition(method) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('課題と目的を結ぶ')).toBeInTheDocument()
+    fireEvent.click(within(navigator).getByRole('button', { name: /02解析手順/ }))
+
+    expect(screen.getByText('02 解析手順')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /02\s*解析手順\s*手順を示す/ })).toHaveClass('is-selected')
+    expect(screen.getByText('Visual: native-diagram')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '構成案を提出' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '構成作成を開始' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'この構成を承認' })).not.toBeInTheDocument()
+  })
+
+  it('confirms once, prevents duplicate submission, and refreshes after completion', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(storyboardData)
+    const pending = deferred<Storyboard>()
+    vi.mocked(startStoryboardAction).mockReturnValue(pending.promise)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    const button = await screen.findByRole('button', { name: '構成案を提出' })
+    fireEvent.click(button)
+    await waitFor(() => expect(startStoryboardAction).toHaveBeenCalledWith('submit', storyboard))
+    expect(window.confirm).toHaveBeenCalledWith('現在の構成案を確認待ちとして提出しますか？')
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    expect(startStoryboardAction).toHaveBeenCalledTimes(1)
+
+    pending.resolve({ ...storyboard, stage: 'awaiting_plan_approval', canSubmit: false, canApprove: true })
+    await waitFor(() => expect(loadAppData).toHaveBeenCalledTimes(2))
+    expect(button).toBeEnabled()
+  })
+
+  it('requires explicit confirmation before approving a plan', async () => {
+    const approvalStoryboard = {
+      ...storyboard, stage: 'awaiting_plan_approval', canSubmit: false, canApprove: true,
+    }
+    vi.mocked(loadAppData).mockResolvedValue({ ...storyboardData, storyboard: approvalStoryboard })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'この構成を承認' }))
+
+    expect(window.confirm).toHaveBeenCalledWith('この構成を承認してHTML制作へ進みますか？')
+    expect(startStoryboardAction).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a stale token rejection without hiding the current Storyboard', async () => {
+    vi.mocked(loadAppData).mockResolvedValue(storyboardData)
+    vi.mocked(startStoryboardAction).mockRejectedValue(new Error('構成案が更新されています。最新のStoryboardを読み直してください。'))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '構成案を提出' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('構成案が更新されています')
+    expect(screen.getByRole('region', { name: 'Storyboard確認' })).toBeInTheDocument()
+  })
+
+  it('shows the approved-plan waiting state without requesting AI status', async () => {
+    vi.mocked(getAiStatus).mockClear()
+    vi.mocked(loadAppData).mockResolvedValue({
+      ...storyboardData,
+      state: { ...storyboardState, mode: 'html-design', stage: 'html_authoring', htmlAvailable: false },
+      storyboard: null,
+      slides: [],
+    })
+    render(<App />)
+
+    expect(await screen.findByText('HTMLを準備しています')).toBeInTheDocument()
+    expect(screen.getByText(/構成案は承認済みです/)).toBeInTheDocument()
+    expect(getAiStatus).not.toHaveBeenCalled()
+    expect(screen.queryByText('AI Actions')).not.toBeInTheDocument()
   })
 })
 
@@ -455,7 +575,9 @@ describe('App AI proposal workflow', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<App />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '変更案を作成' }))
+    const createButton = await screen.findByRole('button', { name: '変更案を作成' })
+    await waitFor(() => expect(createButton).toBeEnabled())
+    fireEvent.click(createButton)
 
     await waitFor(() => expect(startAiProposal).toHaveBeenCalledWith({ slideId: 's1', action: 'shorten', instruction: '' }))
     expect(window.confirm).toHaveBeenCalledWith('現在案を変更せず、選択したスライドの確認用変更案をAIで作成しますか？')
@@ -483,7 +605,9 @@ describe('App AI proposal workflow', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<App />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '変更案を作成' }))
+    const createButton = await screen.findByRole('button', { name: '変更案を作成' })
+    await waitFor(() => expect(createButton).toBeEnabled())
+    fireEvent.click(createButton)
     expect(await screen.findByRole('alert')).toHaveTextContent('Please retry')
 
     fireEvent.click(screen.getByRole('button', { name: '自由に変更' }))

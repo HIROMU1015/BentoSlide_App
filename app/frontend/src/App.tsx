@@ -9,10 +9,12 @@ import {
   startConversion,
   startAiProposal,
   startLifecycleAction,
+  startStoryboardAction,
 } from './api/client'
 import { Inspector } from './components/Inspector'
 import { MainCanvas } from './components/MainCanvas'
 import { SlideNavigator } from './components/SlideNavigator'
+import { StoryboardNavigator } from './components/StoryboardNavigator'
 import { initialReviewMarks, reviewedSlideIds } from './state/reviewState'
 import type {
   AppState,
@@ -28,6 +30,8 @@ import type {
   ReviewMark,
   ReviewMarks,
   SlideItem,
+  Storyboard,
+  StoryboardAction,
 } from './types'
 
 const modeLabels: Record<string, string> = {
@@ -47,6 +51,7 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [slides, setSlides] = useState<SlideItem[]>([])
   const [review, setReview] = useState<HtmlReview | null>(null)
+  const [storyboard, setStoryboard] = useState<Storyboard | null>(null)
   const [bento, setBento] = useState<BentoIntegration | null>(null)
   const [conversion, setConversion] = useState<ConversionStatus | null>(null)
   const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null)
@@ -82,6 +87,7 @@ export default function App() {
       setState(data.state)
       setSlides(data.slides)
       setReview(data.review)
+      setStoryboard(data.storyboard ?? null)
       setBento(data.bento)
       setCurrentMode(data.state.mode)
       setCurrentProposal(data.review?.proposal ?? null)
@@ -227,9 +233,6 @@ export default function App() {
     void getLifecycleStatus()
       .then((result) => result.status === 'running' ? trackLifecycle(result) : setLifecycle(result))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-    void getAiStatus()
-      .then((result) => result.status === 'running' ? trackAi(result) : setAi(result))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     return () => {
       mounted.current = false
       conversionGeneration.current += 1
@@ -242,12 +245,28 @@ export default function App() {
   }, [refresh, trackAi, trackConversion, trackLifecycle])
 
   useEffect(() => {
+    if (state?.mode !== 'html-design' || !state.htmlAvailable) {
+      aiGeneration.current += 1
+      if (aiTimer.current !== null) window.clearTimeout(aiTimer.current)
+      setAi(null)
+      return
+    }
+    void getAiStatus()
+      .then((result) => result.status === 'running' ? trackAi(result) : setAi(result))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+  }, [state?.mode, state?.htmlAvailable, trackAi])
+
+  useEffect(() => {
     setMarks(initialReviewMarks(review?.proposal ?? null))
   }, [review?.actionToken])
 
   const selected = useMemo(
     () => slides.find((slide) => slide.id === selectedSlide) ?? null,
     [slides, selectedSlide],
+  )
+  const selectedStoryboardSlide = useMemo(
+    () => storyboard?.sections.flatMap((section) => section.slides).find((slide) => slide.id === selectedSlide) ?? null,
+    [storyboard, selectedSlide],
   )
 
   const runAction = useCallback(async (action: () => Promise<unknown>, success: string) => {
@@ -352,6 +371,23 @@ export default function App() {
     handleAiProposal(input)
   }
 
+  const handleStoryboardAction = (action: StoryboardAction) => {
+    if (!storyboard || busy) return
+    const prompts: Record<StoryboardAction, string> = {
+      initialize: '資料を確認して構成作成を開始しますか？',
+      submit: '現在の構成案を確認待ちとして提出しますか？',
+      approve: 'この構成を承認してHTML制作へ進みますか？',
+    }
+    const successes: Record<StoryboardAction, string> = {
+      initialize: '構成作成を開始しました。',
+      submit: '構成案を確認待ちとして提出しました。',
+      approve: '構成案を承認し、HTML制作へ進みました。',
+    }
+    if (!window.confirm(prompts[action])) return
+    setError(null)
+    void runAction(() => startStoryboardAction(action, storyboard), successes[action])
+  }
+
   const lifecycleTransitioning = lifecycleRequestBusy || lifecycle?.status === 'running' || lifecycleSettling
   const conversionTransitioning = conversion?.status === 'running' || conversionSettling
   const aiTransitioning = aiRequestBusy || ai?.status === 'running' || aiSettling
@@ -381,7 +417,9 @@ export default function App() {
       </header>
 
       <div className="workspace-grid">
-        <SlideNavigator slides={slides} selectedSlide={selectedSlide} onSelect={setSelectedSlide} />
+        {state.mode === 'storyboard' && storyboard
+          ? <StoryboardNavigator storyboard={storyboard} selectedSlide={selectedSlide} onSelect={setSelectedSlide} />
+          : <SlideNavigator slides={slides} selectedSlide={selectedSlide} onSelect={setSelectedSlide} />}
         <MainCanvas
           state={state}
           review={review}
@@ -389,6 +427,8 @@ export default function App() {
           selectedSlide={selectedSlide}
           onViewChange={chooseHtmlView}
           bento={bento}
+          storyboard={storyboard}
+          onStoryboardSelect={setSelectedSlide}
           transitioning={lifecycleTransitioning || conversionTransitioning}
         />
         <Inspector
@@ -401,6 +441,8 @@ export default function App() {
           conversion={conversion}
           lifecycle={lifecycle}
           ai={ai}
+          storyboard={storyboard}
+          selectedStoryboardSlide={selectedStoryboardSlide}
           onSelectSlide={setSelectedSlide}
           onMark={handleMark}
           onApply={handleApply}
@@ -411,6 +453,7 @@ export default function App() {
           onLifecycleAction={handleLifecycleAction}
           onStartAiProposal={handleAiProposal}
           onRetryAiProposal={handleRetryAiProposal}
+          onStoryboardAction={handleStoryboardAction}
         />
       </div>
 

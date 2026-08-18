@@ -37,6 +37,10 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 ## API境界
 
 - `GET /api/project`, `/api/state`, `/api/slides`: `deck.yaml`をUI向けview modelへ変換します。
+- `GET /api/storyboard`: `REQUEST.md`、3つのplanning文書、任意のvisual plan、section／chapter順を読み取り専用view modelとして返します。
+- `POST /api/storyboard/initialize`: `initialized`で一次資料を確認し、既存の初期化処理へ委譲します。
+- `POST /api/storyboard/submit`: `planning`で既存のplanning検証を実行し、構成案を確認待ちにします。
+- `POST /api/storyboard/approve`: `awaiting_plan_approval`で既存の承認処理を実行し、HTML制作へ進めます。
 - `GET /api/html/review`: 人が読むsummary、impact、affected slideとopaque action tokenだけを返します。
 - `POST /api/html/review/apply`: 全affected slideの確認を検証してから、既存approve/apply/browser-check関数を順に呼びます。
 - `POST /api/html/review/approve-deck`: 既存whole-deck approvalを呼びます。
@@ -55,6 +59,25 @@ Viteは`127.0.0.1:5173`で起動し、`/api`を`127.0.0.1:4180`へ転送しま�
 5つのBento lifecycle POSTはすべて`{ "confirmed": true }`のみを受け付け、`202 Accepted`でバックグラウンド処理を開始します。既知のstage不一致、重複実行、検証できないeditor sessionは`409 Conflict`で拒否します。処理中はAppがstatusを定期取得し、実際の段階と完了数を表示します。
 
 Frontendへproposal digest、revision、任意のartifact path、PIDは返しません。action tokenはprocess-localかつ現在のproposal状態へ固定され、再起動や状態変化で無効になります。
+
+## App内のStoryboard確認フロー
+
+`initialized`、`planning`、`awaiting_plan_approval`では、左にsection別のスライド一覧、中央に構成カード、右に依頼・説明方針・全体ストーリー・スライド構成と選択中の詳細を表示します。Markdown本文はHTMLとして挿入せず、文字列・段落・箇条書きへ変換して表示します。Visual planがある場合だけ、推奨ビジュアルの種類と意図をカードとInspectorへ添えます。
+
+Inspectorに表示する操作は現在stageの1つだけです。
+
+```text
+initialized
+  -> 構成作成を開始
+planning
+  -> 構成案を提出
+awaiting_plan_approval
+  -> この構成を承認
+```
+
+各POSTは`{ "confirmed": true, "actionToken": "..." }`を必要とします。action tokenはworkflow stage、表示対象のplanning文書、visual plan、section／chapterの順序と状態へ固定したprocess-local値です。画面表示後にいずれかが変わった場合は`409 Conflict`となり、最新のStoryboardを読み直してから操作します。ReactやApplication APIは`deck.yaml`とplanning文書を直接変更せず、既存の`deck_workflow`関数だけを呼びます。
+
+承認直後の`html_authoring`でHTMLがまだ存在しない間は「HTMLを準備しています」と表示します。この状態ではHTML review、slide preview、AI Actionsを要求しません。HTMLデザインが既存経路で作成された後に「状態を更新」すると、通常のHTML Design確認へ切り替わります。
 
 ## App内のBento承認フロー
 
@@ -109,3 +132,4 @@ AI Actionsを利用できるのは、`whole_deck`方式の`html_review`で、未
 - AppはWindowsの既存PowerShell launcherでWork editorを起動・停止します。Bento lifecycle操作のeditor連携はWindows専用です。
 - 保存自体は既存Work editorが担当します。React側にBento編集機能は再実装していません。
 - AI ActionsはoptionalなCodex SDK機能です。ネットワークなしの隔離領域で候補だけを生成し、画像生成、Bento直接編集、自動承認、自動反映、自動変換は行いません。
+- Storyboardは今回、確認・提出・承認までの読み取り専用です。App内でplanning文書を編集する機能、スライドの追加・削除・並べ替え、visual plan編集、AIによる構成作成は未実装です。

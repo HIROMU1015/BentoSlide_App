@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { AppState, BentoIntegration, HtmlReview, HtmlView } from '../types'
+import type { AppState, BentoIntegration, HtmlReview, HtmlView, Storyboard } from '../types'
+import { StoryboardCanvas } from './StoryboardCanvas'
 
 type Props = {
   state: AppState
@@ -8,10 +9,12 @@ type Props = {
   selectedSlide: string | null
   onViewChange: (view: HtmlView) => void
   bento: BentoIntegration | null
+  storyboard: Storyboard | null
+  onStoryboardSelect: (slideId: string) => void
   transitioning?: boolean
 }
 
-function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Omit<Props, 'state' | 'bento'>) {
+function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Props) {
   const frame = useRef<HTMLIFrameElement>(null)
   const source = htmlView === 'candidate' ? review?.candidateHtmlUrl : review?.currentHtmlUrl
 
@@ -42,7 +45,12 @@ function HtmlCanvas({ review, htmlView, selectedSlide, onViewChange }: Omit<Prop
   }, [syncFrame])
 
   if (!review || !source) {
-    return <EmptyCanvas title="HTMLを準備中" detail="表示できるHTMLがまだありません。" />
+    return (
+      <EmptyCanvas
+        title="HTMLを準備しています"
+        detail="構成案は承認済みです。HTMLデザインが作成されると、ここにプレビューが表示されます。"
+      />
+    )
   }
 
   return (
@@ -98,7 +106,16 @@ function EmptyCanvas({ title, detail }: { title: string; detail: string }) {
 }
 
 export function MainCanvas(props: Props) {
-  const { state, bento, transitioning } = props
+  const { state, bento, storyboard, transitioning } = props
+  if (state.mode === 'storyboard' && storyboard) {
+    return (
+      <StoryboardCanvas
+        storyboard={storyboard}
+        selectedSlide={props.selectedSlide}
+        onSelect={props.onStoryboardSelect}
+      />
+    )
+  }
   if (state.mode === 'html-design') return <HtmlCanvas {...props} />
   if (transitioning && (state.mode === 'bento-edit' || state.mode === 'final-edit')) {
     return <EmptyCanvas title="BentoSlideを更新しています" detail="編集画面を安全に切り替えています。" />

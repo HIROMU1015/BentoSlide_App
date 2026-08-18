@@ -107,8 +107,16 @@ class WorkflowService:
             canEditBento=stage in bento_stages,
             hasCandidate=_active_proposal(state) is not None,
             isBlocked=stage == "blocked",
+            htmlAvailable=self.html_available(state),
             bentoEditorUrl=editor_url,
         )
+
+    def html_available(self, state: dict[str, Any] | None = None) -> bool:
+        try:
+            self.html_source(state)
+        except FileNotFoundError:
+            return False
+        return True
 
     def html_source(self, state: dict[str, Any] | None = None) -> Path:
         current = state or self.state()
@@ -123,7 +131,12 @@ class WorkflowService:
 
     def slides(self, *, view: str = "current") -> SlidesResponse:
         state = self.state()
-        source = self.html_source(state)
+        try:
+            source = self.html_source(state)
+        except FileNotFoundError:
+            if state["workflow"]["stage"] == "html_authoring":
+                return SlidesResponse(view="current", slides=[])
+            raise
         if view == "candidate":
             proposal = _active_proposal(state)
             relative = proposal.get("candidateHtml") if proposal else None

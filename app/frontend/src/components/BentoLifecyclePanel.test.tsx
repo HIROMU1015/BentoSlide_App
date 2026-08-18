@@ -5,7 +5,7 @@ import { BentoLifecyclePanel } from './BentoLifecyclePanel'
 
 const baseState: AppState = {
   mode: 'bento-edit', stage: 'bento_authoring', statusLabel: '編集中', nextActionLabel: '確認',
-  canConvert: false, canEditBento: true, hasCandidate: false, isBlocked: false,
+  canConvert: false, htmlAvailable: true, canEditBento: true, hasCandidate: false, isBlocked: false,
   bentoEditorUrl: 'http://127.0.0.1:8765/',
 }
 

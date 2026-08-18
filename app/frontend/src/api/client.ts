@@ -10,6 +10,8 @@ import type {
   LifecycleStatus,
   ProjectResponse,
   SlideItem,
+  Storyboard,
+  StoryboardAction,
 } from '../types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -30,6 +32,7 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
   state: AppState
   slides: SlideItem[]
   review: HtmlReview | null
+  storyboard?: Storyboard | null
   slideView: HtmlView
   bento: BentoIntegration
 }> {
@@ -38,10 +41,36 @@ export async function loadAppData(requestedView: HtmlView = 'current'): Promise<
     request<AppState>('/api/state'),
     request<BentoIntegration>('/api/bento'),
   ])
-  const review = state.mode === 'html-design' ? await request<HtmlReview>('/api/html/review') : null
+  const storyboard = state.mode === 'storyboard' ? await request<Storyboard>('/api/storyboard') : null
+  const review = state.mode === 'html-design' && state.htmlAvailable
+    ? await request<HtmlReview>('/api/html/review')
+    : null
   const slideView = requestedView === 'candidate' && review?.candidateHtmlUrl ? 'candidate' : 'current'
-  const slidesResponse = await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)
-  return { project, state, slides: slidesResponse.slides, review, slideView, bento }
+  const storyboardSlides: SlideItem[] = storyboard?.sections.flatMap((section) => section.slides.map((slide) => ({
+    id: slide.id,
+    title: slide.title,
+    number: slide.number,
+    sectionTitle: section.title,
+  }))) ?? []
+  const slides = storyboard
+    ? storyboardSlides
+    : state.htmlAvailable
+      ? (await request<{ slides: SlideItem[] }>(`/api/slides?view=${slideView}`)).slides
+      : []
+  return { project, state, slides, review, storyboard, slideView, bento }
+}
+
+const storyboardEndpoints: Record<StoryboardAction, string> = {
+  initialize: '/api/storyboard/initialize',
+  submit: '/api/storyboard/submit',
+  approve: '/api/storyboard/approve',
+}
+
+export function startStoryboardAction(action: StoryboardAction, storyboard: Storyboard) {
+  return request<Storyboard>(storyboardEndpoints[action], {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true, actionToken: storyboard.actionToken }),
+  })
 }
 
 export function getConversionStatus() {

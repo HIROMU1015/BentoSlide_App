@@ -16,6 +16,7 @@ export type AppState = {
   stage: string
   statusLabel: string
   nextActionLabel: string
+  htmlAvailable: boolean
   canConvert: boolean
   canEditBento: boolean
   hasCandidate: boolean
@@ -84,6 +85,56 @@ export type SlideItem = {
   number: number
   sectionTitle: string | null
 }
+
+export type StoryboardDocumentSection = {
+  title: string
+  paragraphs: string[]
+  bullets: string[]
+}
+
+export type StoryboardDocument = {
+  title: string
+  sections: StoryboardDocumentSection[]
+}
+
+export type StoryboardVisual = {
+  recommended: boolean
+  type: string
+  intent: string | null
+  purpose: string | null
+}
+
+export type StoryboardSlide = {
+  id: string
+  number: number
+  title: string
+  points: string[]
+  sectionId: string
+  sectionTitle: string
+  visual: StoryboardVisual | null
+}
+
+export type StoryboardSection = {
+  id: string
+  title: string
+  slides: StoryboardSlide[]
+}
+
+export type Storyboard = {
+  stage: string
+  request: StoryboardDocument
+  explanationPolicy: StoryboardDocument
+  storyOutline: StoryboardDocument
+  slidePlan: StoryboardDocument
+  sections: StoryboardSection[]
+  canInitialize: boolean
+  canSubmit: boolean
+  canApprove: boolean
+  nextActionLabel: string
+  actionToken: string
+}
+
+export type StoryboardAction = 'initialize' | 'submit' | 'approve'
 
 export type ReviewSlide = {
   id: string

@@ -19,6 +19,7 @@ from app.backend.services.ai_proposal_service import AiProposalService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService
+from app.backend.services.storyboard_service import StoryboardService
 
 
 def create_app(
@@ -28,6 +29,7 @@ def create_app(
     conversion_service: ConversionService | None = None,
     lifecycle_service: BentoLifecycleService | None = None,
     ai_service: AiProposalService | None = None,
+    storyboard_service: StoryboardService | None = None,
 ) -> FastAPI:
     root = repository_root(repository or Path(__file__).resolve().parents[2])
     recover_repository_transactions(root)
@@ -37,6 +39,7 @@ def create_app(
     conversion = conversion_service or ConversionService(root)
     lifecycle = lifecycle_service or BentoLifecycleService(root)
     ai = ai_service or AiProposalService(root)
+    storyboard = storyboard_service or StoryboardService(root)
 
     application = FastAPI(title="BentoSlide Application API", version="0.1.0")
     application.state.repository = root
@@ -46,6 +49,7 @@ def create_app(
     application.state.conversion_service = conversion
     application.state.lifecycle_service = lifecycle
     application.state.ai_service = ai
+    application.state.storyboard_service = storyboard
 
     @application.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, exc: WorkflowError) -> JSONResponse:
@@ -67,6 +71,7 @@ def create_app(
         conversion=conversion,
         lifecycle=lifecycle,
         ai=ai,
+        storyboard=storyboard,
     ))
 
     dist = Path(frontend_dist).resolve() if frontend_dist else root / "app/frontend/dist"

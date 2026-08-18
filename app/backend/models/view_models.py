@@ -46,6 +46,7 @@ class StateResponse(BaseModel):
     canEditBento: bool
     hasCandidate: bool
     isBlocked: bool
+    htmlAvailable: bool
     bentoEditorUrl: str | None = None
 
 
@@ -156,6 +157,61 @@ class AiStatusResponse(BaseModel):
     message: str
     error: str | None = None
     retryable: bool = False
+
+
+class StoryboardDocumentSection(BaseModel):
+    title: str
+    paragraphs: list[str] = Field(default_factory=list)
+    bullets: list[str] = Field(default_factory=list)
+
+
+class StoryboardDocument(BaseModel):
+    title: str
+    sections: list[StoryboardDocumentSection] = Field(default_factory=list)
+
+
+class StoryboardVisual(BaseModel):
+    recommended: bool
+    type: str
+    intent: str | None = None
+    purpose: str | None = None
+
+
+class StoryboardSlide(BaseModel):
+    id: str
+    number: int
+    title: str
+    points: list[str] = Field(default_factory=list)
+    sectionId: str
+    sectionTitle: str
+    visual: StoryboardVisual | None = None
+
+
+class StoryboardSection(BaseModel):
+    id: str
+    title: str
+    slides: list[StoryboardSlide] = Field(default_factory=list)
+
+
+class StoryboardResponse(BaseModel):
+    stage: str
+    request: StoryboardDocument
+    explanationPolicy: StoryboardDocument
+    storyOutline: StoryboardDocument
+    slidePlan: StoryboardDocument
+    sections: list[StoryboardSection] = Field(default_factory=list)
+    canInitialize: bool
+    canSubmit: bool
+    canApprove: bool
+    nextActionLabel: str
+    actionToken: str = Field(min_length=20, max_length=256)
+
+
+class StoryboardActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actionToken: str = Field(min_length=20, max_length=256)
+    confirmed: Literal[True]
 
 
 class ActionResponse(BaseModel):

@@ -52,6 +52,9 @@ button { color: inherit; }
 .slide-copy { min-width: 0; display: grid; gap: 4px; }
 .slide-copy strong { font-size: 12px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .slide-copy small { color: #94a3b8; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.storyboard-nav-sections { padding: 8px 0 24px; }
+.storyboard-nav-sections h2 { margin: 10px 16px 3px; color: #64748b; font-size: 10px; line-height: 1.4; }
+.storyboard-nav-sections .slide-list { padding-top: 2px; padding-bottom: 4px; }
 
 .main-canvas { min-width: 0; min-height: 0; background: var(--canvas); display: grid; grid-template-rows: 48px minmax(0, 1fr); }
 .canvas-toolbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; background: rgba(255,255,255,.92); border-bottom: 1px solid var(--line); }
@@ -73,6 +76,25 @@ button { color: inherit; }
 .empty-icon { width: 56px; height: 56px; margin: 0 auto 10px; border-radius: 16px; display: grid; place-items: center; background: #fff; color: #94a3b8; box-shadow: var(--shadow); font-size: 24px; }
 .empty-canvas h2 { margin: 10px 0 6px; font-size: 18px; }
 .empty-canvas p { margin: 0; color: var(--muted); font-size: 13px; }
+.storyboard-canvas { background: #edf0f4; }
+.storyboard-canvas .canvas-toolbar strong { font-size: 12px; }
+.storyboard-scroll { min-height: 0; overflow: auto; padding: 24px; }
+.storyboard-section { max-width: 980px; margin: 0 auto 26px; }
+.storyboard-section > header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.storyboard-section > header span { color: #94a3b8; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
+.storyboard-section > header h2 { margin: 0; font-size: 15px; }
+.storyboard-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.storyboard-card { min-height: 176px; padding: 15px; border: 1px solid #d7dde6; border-radius: 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 9px; background: #fff; text-align: left; box-shadow: 0 3px 10px rgba(30,41,59,.05); cursor: pointer; }
+.storyboard-card:hover { border-color: #93c5fd; }
+.storyboard-card.is-selected { border-color: #2563eb; box-shadow: 0 0 0 2px #bfdbfe, 0 5px 16px rgba(37,99,235,.12); }
+.storyboard-card-number { color: #94a3b8; font: 700 10px ui-monospace, monospace; }
+.storyboard-card > strong { font-size: 14px; line-height: 1.4; }
+.storyboard-card ul { margin: 0; padding-left: 17px; color: #64748b; font-size: 10px; line-height: 1.5; }
+.visual-badge { margin-top: auto; padding: 4px 7px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 9px; font-weight: 700; }
+.visual-badge.recommended { background: #ede9fe; color: #6d28d9; }
+.storyboard-empty { max-width: 640px; margin: 60px auto; padding: 26px; border-radius: 12px; background: #fff; text-align: center; box-shadow: var(--shadow); }
+.storyboard-empty h2 { margin: 0 0 8px; font-size: 17px; }
+.storyboard-empty p { margin: 0; color: var(--muted); font-size: 12px; }
 
 .inspector-section { padding: 16px; border-bottom: 1px solid var(--line); }
 .section-kicker { margin-bottom: 8px; color: #64748b; font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -81,6 +103,17 @@ button { color: inherit; }
 .selection-card { display: grid; gap: 4px; }
 .selection-card strong { font-size: 13px; }
 .selection-card small { color: var(--muted); font-size: 10px; }
+.storyboard-inspector .selection-card p { margin-top: 4px; }
+.visual-detail { margin-top: 8px; padding: 9px; border-radius: 8px; background: #f5f3ff; }
+.visual-detail strong { color: #6d28d9; font-size: 10px; }
+.storyboard-details { padding-top: 13px; padding-bottom: 13px; }
+.storyboard-details summary { cursor: pointer; color: #334155; font-size: 11px; font-weight: 800; }
+.storyboard-document { margin-top: 10px; }
+.storyboard-document section + section { margin-top: 12px; }
+.storyboard-document h4 { margin: 0 0 5px; font-size: 10px; }
+.storyboard-document p { margin: 0 0 5px; }
+.storyboard-document ul { margin: 5px 0 0; padding-left: 17px; color: #475569; font-size: 10px; line-height: 1.5; }
+.storyboard-action p { margin-bottom: 0; }
 .muted { color: var(--muted) !important; }
 .review-progress { margin: 15px 0 7px; display: flex; justify-content: space-between; align-items: center; color: #64748b; font-size: 10px; }
 .review-progress strong { color: #334155; }

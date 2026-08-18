@@ -1,11 +1,12 @@
 import type {
   AiProposalInput, AiStatus, AppState, ConversionStatus, HtmlReview, LifecycleAction, LifecycleStatus,
-  ReviewMark, ReviewMarks, SlideItem,
+  ReviewMark, ReviewMarks, SlideItem, Storyboard, StoryboardAction, StoryboardSlide,
 } from '../types'
 import { BentoLifecyclePanel } from './BentoLifecyclePanel'
 import { ConversionPanel } from './ConversionPanel'
 import { HtmlReviewPanel } from './HtmlReviewPanel'
 import { AiActionsPanel } from './AiActionsPanel'
+import { StoryboardInspector } from './StoryboardInspector'
 
 type Props = {
   state: AppState
@@ -17,6 +18,8 @@ type Props = {
   conversion: ConversionStatus | null
   lifecycle: LifecycleStatus | null
   ai: AiStatus | null
+  storyboard: Storyboard | null
+  selectedStoryboardSlide: StoryboardSlide | null
   onSelectSlide: (slideId: string) => void
   onMark: (slideId: string, mark: ReviewMark) => void
   onApply: () => void
@@ -27,10 +30,21 @@ type Props = {
   onLifecycleAction: (action: LifecycleAction, retry?: boolean) => void
   onStartAiProposal: (input: AiProposalInput) => void
   onRetryAiProposal: (input: AiProposalInput) => void
+  onStoryboardAction: (action: StoryboardAction) => void
 }
 
 export function Inspector(props: Props) {
   const { state, selected, selectedElement, review } = props
+  if (state.mode === 'storyboard' && props.storyboard) {
+    return (
+      <StoryboardInspector
+        storyboard={props.storyboard}
+        selected={props.selectedStoryboardSlide}
+        busy={props.busy}
+        onAction={props.onStoryboardAction}
+      />
+    )
+  }
   return (
     <aside className="inspector">
       <div className="panel-heading"><span>Inspector</span></div>
@@ -63,14 +77,16 @@ export function Inspector(props: Props) {
         />
       )}
 
-      <AiActionsPanel
-        selected={selected}
-        status={props.ai}
-        disabled={props.busy || state.mode !== 'html-design'}
-        hasProposal={Boolean(review?.proposal && review.proposal.status !== 'applied')}
-        onStart={props.onStartAiProposal}
-        onRetry={props.onRetryAiProposal}
-      />
+      {state.mode === 'html-design' && state.htmlAvailable && review && (
+        <AiActionsPanel
+          selected={selected}
+          status={props.ai}
+          disabled={props.busy}
+          hasProposal={Boolean(review.proposal && review.proposal.status !== 'applied')}
+          onStart={props.onStartAiProposal}
+          onRetry={props.onRetryAiProposal}
+        />
+      )}
     </aside>
   )
 }

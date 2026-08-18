@@ -4,7 +4,7 @@
 
 ## BentoSlide App prototype
 
-既存engineをそのまま利用するReact + FastAPIのデスクトップ向けGUIを`app/`に用意しています。Windowsでは`start_bentoslide_app.cmd`、停止は`stop_bentoslide_app.cmd`を使用します。従来の`start_deck_workspace.cmd`は引き続き独立して利用できます。構成と開発起動は[app/README.md](app/README.md)を参照してください。
+既存engineをそのまま利用するReact + FastAPIのデスクトップ向けGUIを`app/`に用意しています。Storyboardの確認・提出・承認、HTML Review、変換、Bento編集と承認を既存workflowへ委譲してApp内から進められます。Windowsでは`start_bentoslide_app.cmd`、停止は`stop_bentoslide_app.cmd`を使用します。従来の`start_deck_workspace.cmd`は引き続き独立して利用できます。構成と開発起動は[app/README.md](app/README.md)を参照してください。
 
 ## 最短の使い方
 

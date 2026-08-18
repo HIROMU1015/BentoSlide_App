@@ -22,6 +22,8 @@ from app.backend.models.view_models import (
     SlidesResponse,
     StateResponse,
     StartConversionRequest,
+    StoryboardActionRequest,
+    StoryboardResponse,
 )
 from app.backend.services.bento_service import BentoService
 from app.backend.services.ai_proposal_service import AiProposalService
@@ -29,6 +31,7 @@ from app.backend.services.bento_lifecycle_service import BentoLifecycleService
 from app.backend.services.conversion_service import ConversionService
 from app.backend.services.html_review_service import HtmlReviewService
 from app.backend.services.workflow_service import WorkflowService
+from app.backend.services.storyboard_service import StoryboardService
 
 
 def create_api_router(
@@ -36,6 +39,7 @@ def create_api_router(
     conversion: ConversionService,
     lifecycle: BentoLifecycleService,
     ai: AiProposalService,
+    storyboard: StoryboardService,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -55,6 +59,22 @@ def create_api_router(
     def state() -> StateResponse:
         return workflow.state_view()
 
+    @router.get("/storyboard", response_model=StoryboardResponse)
+    def storyboard_view() -> StoryboardResponse:
+        return storyboard.view()
+
+    @router.post("/storyboard/initialize", response_model=StoryboardResponse)
+    def initialize_storyboard(request: StoryboardActionRequest) -> StoryboardResponse:
+        return storyboard.initialize(action_token=request.actionToken)
+
+    @router.post("/storyboard/submit", response_model=StoryboardResponse)
+    def submit_storyboard(request: StoryboardActionRequest) -> StoryboardResponse:
+        return storyboard.submit(action_token=request.actionToken)
+
+    @router.post("/storyboard/approve", response_model=StoryboardResponse)
+    def approve_storyboard(request: StoryboardActionRequest) -> StoryboardResponse:
+        return storyboard.approve(action_token=request.actionToken)
+
     @router.get("/slides", response_model=SlidesResponse)
     def slides(view: Literal["current", "candidate"] = "current") -> SlidesResponse:
         try:
@@ -64,7 +84,10 @@ def create_api_router(
 
     @router.get("/html/review", response_model=HtmlReviewResponse)
     def review() -> HtmlReviewResponse:
-        return html_review.review()
+        try:
+            return html_review.review()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="HTML preview is not available yet") from exc
 
     @router.post("/html/review/apply", response_model=ActionResponse)
     def apply_change(request: ApplyHtmlRequest) -> ActionResponse:
