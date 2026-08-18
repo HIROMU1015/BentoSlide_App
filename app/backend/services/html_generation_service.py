@@ -36,7 +36,9 @@ from app.backend.services.ai_proposal_service import (
     _unsupported_visible_tokens,
 )
 from bento_converter.artifact_transaction import (
+    ArtifactLeaseConflict,
     ArtifactTransactionStore,
+    WriterLease,
     bytes_revision,
     file_revision,
 )
@@ -62,7 +64,10 @@ from scripts.deck_workflow import (
     _repo_path,
     command_apply_initial_html_candidate,
     load_state,
+    load_state_from_payload,
+    planning_action_artifact_paths,
     planning_review_signature,
+    planning_review_signature_from_payloads,
 )
 
 
@@ -201,6 +206,8 @@ class _CandidateMarkupParser(HTMLParser):
 StateLoader = Callable[[Path], dict[str, Any]]
 ApplyCommand = Callable[..., dict[str, Any]]
 BrowserValidator = Callable[..., HtmlChangeBrowserEvidence]
+SnapshotHook = Callable[[str], None]
+SourceLayoutEntry = tuple[dict[str, str], Path, bool]
 
 
 class HtmlGenerationService:
@@ -214,12 +221,14 @@ class HtmlGenerationService:
         state_loader: StateLoader = load_state,
         apply_command: ApplyCommand = command_apply_initial_html_candidate,
         browser_validator: BrowserValidator = collect_html_change_browser_evidence,
+        snapshot_hook: SnapshotHook | None = None,
     ) -> None:
         self.repository = Path(repository).resolve()
         self.adapter = adapter or CodexSdkAdapter()
         self._state_loader = state_loader
         self._apply_command = apply_command
         self._browser_validator = browser_validator
+        self._snapshot_hook = snapshot_hook
         self._run_root = self.repository / ".bento-ai" / "runs"
         self._lock = threading.RLock()
         self._token_lock = threading.Lock()
@@ -502,13 +511,21 @@ class HtmlGenerationService:
         except BaseException:
             return False
 
-    def _planning_snapshot(self, state: dict[str, Any]) -> PlanningCandidate:
-        artifacts: dict[str, bytes] = {}
-        for name, relative in PLANNING_ARTIFACT_FILES.items():
-            path = (self.repository / relative).resolve()
-            if not path.is_file():
-                raise WorkflowError("初期HTML生成には承認済みの4つのplanning文書が必要です")
-            artifacts[name] = path.read_bytes()
+    def _planning_snapshot(
+        self,
+        state: dict[str, Any],
+        artifacts: dict[str, bytes] | None = None,
+    ) -> PlanningCandidate:
+        if artifacts is None:
+            artifacts = {}
+            for name, relative in PLANNING_ARTIFACT_FILES.items():
+                path = (self.repository / relative).resolve()
+                try:
+                    artifacts[name] = path.read_bytes()
+                except OSError as exc:
+                    raise WorkflowError(
+                        "初期HTML生成には承認済みの4つのplanning文書が必要です"
+                    ) from exc
         sections = [
             {"id": str(section_id), "title": str(value.get("title") or section_id), "slideIds": list(value.get("slideIds") or [])}
             for section_id, value in state["sections"].items()
@@ -518,15 +535,18 @@ class HtmlGenerationService:
         except BentoConverterError as exc:
             raise WorkflowError("承認済みplanning snapshotが初期HTML生成の厳密な形式を満たしていません") from exc
 
-    def _source_entries(self, state: dict[str, Any]) -> tuple[list[dict[str, str]], dict[Path, str | None]]:
+    def _source_layout(
+        self,
+        state: dict[str, Any],
+        manifest_payload: bytes,
+    ) -> tuple[Path, list[SourceLayoutEntry]]:
         manifest = _repo_path(self.repository, state["sources"]["manifest"], field="sources.manifest")
         try:
-            value = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            value = yaml.safe_load(manifest_payload.decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
             raise WorkflowError("Source manifestを読み取れません") from exc
         items = value.get("items", []) if isinstance(value, dict) else []
-        entries: list[dict[str, str]] = []
-        revisions: dict[Path, str | None] = {manifest: file_revision(manifest)}
+        layout: list[SourceLayoutEntry] = []
         used_ids: set[str] = set()
         used_paths: set[Path] = set()
         for item in items:
@@ -537,42 +557,70 @@ class HtmlGenerationService:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", source_id) or not isinstance(relative, str):
                 raise WorkflowError("Source manifest entry is invalid")
             source = _repo_path(self.repository, relative, field="sources.items.path")
-            if not source.is_file():
-                raise WorkflowError(f"許可されたsourceが見つかりません: {relative}")
             if source_id in used_ids or source in used_paths:
                 continue
-            entry = {
+            layout.append(({
                 "id": source_id,
                 "path": source.relative_to(self.repository).as_posix(),
                 "type": str(item.get("type") or "application/octet-stream"),
                 "role": str(item["role"]),
-            }
-            entries.append(entry)
-            revisions[source] = file_revision(source)
+            }, source, True))
             used_ids.add(source_id)
             used_paths.add(source)
         for index, relative in enumerate(state.get("project", {}).get("supplementarySources") or [], start=1):
             source = _repo_path(self.repository, relative, field="project.supplementarySources")
-            if source in used_paths or not source.is_file():
+            if source in used_paths:
                 continue
             source_id = f"project-supplementary-{index}"
-            entries.append({
+            if source_id in used_ids:
+                continue
+            layout.append(({
                 "id": source_id,
                 "path": source.relative_to(self.repository).as_posix(),
                 "type": "application/octet-stream",
                 "role": "supplementary",
-            })
-            revisions[source] = file_revision(source)
+            }, source, False))
             used_ids.add(source_id)
             used_paths.add(source)
+        return manifest, layout
+
+    def _read_source_layout(
+        self,
+        manifest: Path,
+        manifest_payload: bytes,
+        layout: list[SourceLayoutEntry],
+    ) -> tuple[list[dict[str, str]], dict[Path, bytes]]:
+        entries: list[dict[str, str]] = []
+        payloads = {manifest: manifest_payload}
+        for entry, source, required in layout:
+            try:
+                payload = source.read_bytes()
+            except OSError as exc:
+                if required:
+                    raise WorkflowError(f"許可されたsourceが見つかりません: {entry['path']}") from exc
+                continue
+            entries.append(entry)
+            payloads[source] = payload
         if not any(entry["role"] == "primary" for entry in entries):
             raise WorkflowError("初期HTML生成に利用できるprimary sourceがありません")
-        return entries, revisions
+        return entries, payloads
+
+    def _source_entries(self, state: dict[str, Any]) -> tuple[list[dict[str, str]], dict[Path, str | None]]:
+        manifest = _repo_path(self.repository, state["sources"]["manifest"], field="sources.manifest")
+        try:
+            manifest_payload = manifest.read_bytes()
+        except OSError as exc:
+            raise WorkflowError("Source manifestを読み取れません") from exc
+        manifest, layout = self._source_layout(state, manifest_payload)
+        entries, payloads = self._read_source_layout(manifest, manifest_payload, layout)
+        return entries, {path: bytes_revision(payload) for path, payload in payloads.items()}
 
     def _context_signature(
         self,
         state: dict[str, Any],
         revisions: dict[Path, str | None] | None = None,
+        *,
+        planning_signature: str | None = None,
     ) -> str:
         if revisions is None:
             _, revisions = self._source_entries(state)
@@ -591,72 +639,162 @@ class HtmlGenerationService:
         ]
         value = {
             "format": "bento/html-generation-context/v1",
-            "planningSignature": planning_review_signature(self.repository, state),
+            "planningSignature": planning_signature or planning_review_signature(self.repository, state),
             "inputs": records,
         }
         return _sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
     def _prepare_workspace(self, workspace: Path, instruction: str) -> dict[str, Any]:
-        state = self._state()
-        if not self._state_is_supported(state):
+        initial_state = self._state()
+        if not self._state_is_supported(initial_state):
             raise WorkflowError("現在の状態では初期HTMLを生成できません")
-        planning = self._planning_snapshot(state)
-        inputs = workspace / "inputs"
-        planning_dir = inputs / "planning"
-        planning_dir.mkdir(parents=True, exist_ok=False)
-        for name in PLANNING_ARTIFACT_NAMES:
-            (planning_dir / PLANNING_ARTIFACT_FILENAMES[name]).write_bytes(planning.artifacts[name])
-        request_path = _repo_path(self.repository, state["project"]["request"], field="project.request")
-        shutil.copyfile(request_path, inputs / "REQUEST.md")
-        entries, source_revisions = self._source_entries(state)
-        source_revisions[request_path] = file_revision(request_path)
-        sources_dir = inputs / "sources"
-        sources_dir.mkdir()
-        for entry in entries:
-            source = _repo_path(self.repository, entry["path"], field="source snapshot")
-            target = sources_dir / entry["id"] / source.name
-            target.parent.mkdir(parents=True)
-            shutil.copyfile(source, target)
-        (inputs / "source-manifest.json").write_bytes(_json_payload({"items": entries}))
-        (inputs / "project.json").write_bytes(_json_payload({
-            "kind": state["project"]["kind"],
-            "title": state["project"]["title"],
-        }))
-        (inputs / "sections.json").write_bytes(_json_payload({
-            "sections": [
-                {"id": section.id, "title": section.title, "slideIds": list(section.slide_ids)}
-                for section in planning.sections
-            ]
-        }))
-        (inputs / "instruction.json").write_bytes(_json_payload({"instruction": instruction}))
-        (inputs / "output-schema.json").write_bytes(_json_payload(HtmlGenerationAgentResult.model_json_schema()))
-        specifications = inputs / "specifications"
-        specifications.mkdir()
-        for relative in RELEVANT_SPECIFICATIONS:
-            source = _repo_path(self.repository, relative, field="HTML generation specification")
-            if not source.is_file():
-                raise WorkflowError("初期HTML生成に必要な仕様がありません")
-            shutil.copyfile(source, specifications / source.name)
-            source_revisions[source] = file_revision(source)
-        input_hashes = {
-            path.relative_to(workspace).as_posix(): _sha256(path.read_bytes())
-            for path in inputs.rglob("*") if path.is_file()
-        }
-        authority_text = "\n".join(
-            _authority_text(path) for path in sources_dir.rglob("*") if path.is_file()
+        initial_manifest = _repo_path(
+            self.repository, initial_state["sources"]["manifest"], field="sources.manifest",
         )
-        return {
-            "state": state,
-            "planning": planning,
-            "base_planning_signature": planning_review_signature(self.repository, state),
-            "base_context_signature": self._context_signature(state, source_revisions),
-            "base_state_revision": file_revision(self.repository / "deck.yaml"),
-            "source_entries": entries,
-            "source_ids": {entry["id"] for entry in entries},
-            "source_revisions": source_revisions,
-            "input_hashes": input_hashes,
-            "authority_text": authority_text,
+        try:
+            initial_manifest_payload = initial_manifest.read_bytes()
+        except OSError as exc:
+            raise WorkflowError("Source manifestを読み取れません") from exc
+        initial_manifest, initial_layout = self._source_layout(initial_state, initial_manifest_payload)
+        specification_paths = tuple(
+            _repo_path(self.repository, relative, field="HTML generation specification")
+            for relative in RELEVANT_SPECIFICATIONS
+        )
+        lease_paths = {
+            *planning_action_artifact_paths(self.repository, initial_state),
+            initial_manifest,
+            *(source for _, source, _ in initial_layout),
+            *specification_paths,
         }
+        lease = WriterLease(self.repository, lease_paths)
+        try:
+            lease.acquire()
+        except ArtifactLeaseConflict as exc:
+            raise WorkflowError(
+                "初期HTML生成の入力が別の処理で更新中です。完了後に再試行してください。"
+            ) from exc
+        try:
+            deck_path = (self.repository / "deck.yaml").resolve()
+            deck_payload = deck_path.read_bytes()
+            state = load_state_from_payload(self.repository, deck_payload)
+            if not self._state_is_supported(state):
+                raise WorkflowError("現在の状態では初期HTMLを生成できません")
+            manifest = _repo_path(
+                self.repository, state["sources"]["manifest"], field="sources.manifest",
+            )
+            protected_paths = set(lease.artifacts)
+            required_paths = {
+                *planning_action_artifact_paths(self.repository, state),
+                manifest,
+                *specification_paths,
+            }
+            if not required_paths.issubset(protected_paths):
+                raise _StaleHtmlGenerationInputs(STALE_MESSAGE)
+            try:
+                manifest_payload = manifest.read_bytes()
+            except OSError as exc:
+                raise WorkflowError("Source manifestを読み取れません") from exc
+            manifest, source_layout = self._source_layout(state, manifest_payload)
+            required_paths.update(source for _, source, _ in source_layout)
+            if not required_paths.issubset(protected_paths):
+                raise _StaleHtmlGenerationInputs(STALE_MESSAGE)
+
+            planning_payloads = {
+                name: (self.repository / relative).resolve().read_bytes()
+                for name, relative in PLANNING_ARTIFACT_FILES.items()
+            }
+            request_path = _repo_path(
+                self.repository, state["project"]["request"], field="project.request",
+            )
+            request_payload = request_path.read_bytes()
+            if self._snapshot_hook is not None:
+                self._snapshot_hook("request-snapshotted")
+            entries, source_payloads = self._read_source_layout(
+                manifest, manifest_payload, source_layout,
+            )
+            specification_payloads: dict[Path, bytes] = {}
+            for source in specification_paths:
+                try:
+                    specification_payloads[source] = source.read_bytes()
+                except OSError as exc:
+                    raise WorkflowError("初期HTML生成に必要な仕様がありません") from exc
+
+            planning = self._planning_snapshot(state, planning_payloads)
+            signature_payloads: dict[Path, bytes | None] = {
+                deck_path: deck_payload,
+                request_path: request_payload,
+                **{
+                    (self.repository / relative).resolve(): planning_payloads[name]
+                    for name, relative in PLANNING_ARTIFACT_FILES.items()
+                },
+            }
+            base_planning_signature = planning_review_signature_from_payloads(
+                self.repository, state, signature_payloads,
+            )
+            source_revisions = {
+                path: bytes_revision(payload)
+                for path, payload in {
+                    **source_payloads,
+                    request_path: request_payload,
+                    **specification_payloads,
+                }.items()
+            }
+
+            inputs = workspace / "inputs"
+            planning_dir = inputs / "planning"
+            planning_dir.mkdir(parents=True, exist_ok=False)
+            for name in PLANNING_ARTIFACT_NAMES:
+                (planning_dir / PLANNING_ARTIFACT_FILENAMES[name]).write_bytes(planning.artifacts[name])
+            (inputs / "REQUEST.md").write_bytes(request_payload)
+            sources_dir = inputs / "sources"
+            sources_dir.mkdir()
+            for entry in entries:
+                source = _repo_path(self.repository, entry["path"], field="source snapshot")
+                target = sources_dir / entry["id"] / source.name
+                target.parent.mkdir(parents=True)
+                target.write_bytes(source_payloads[source])
+            (inputs / "source-manifest.json").write_bytes(_json_payload({"items": entries}))
+            (inputs / "project.json").write_bytes(_json_payload({
+                "kind": state["project"]["kind"],
+                "title": state["project"]["title"],
+            }))
+            (inputs / "sections.json").write_bytes(_json_payload({
+                "sections": [
+                    {"id": section.id, "title": section.title, "slideIds": list(section.slide_ids)}
+                    for section in planning.sections
+                ]
+            }))
+            (inputs / "instruction.json").write_bytes(_json_payload({"instruction": instruction}))
+            (inputs / "output-schema.json").write_bytes(
+                _json_payload(HtmlGenerationAgentResult.model_json_schema())
+            )
+            specifications = inputs / "specifications"
+            specifications.mkdir()
+            for source, payload in specification_payloads.items():
+                (specifications / source.name).write_bytes(payload)
+            input_hashes = {
+                path.relative_to(workspace).as_posix(): _sha256(path.read_bytes())
+                for path in inputs.rglob("*") if path.is_file()
+            }
+            authority_text = "\n".join(
+                _authority_text(path) for path in sources_dir.rglob("*") if path.is_file()
+            )
+            return {
+                "state": state,
+                "planning": planning,
+                "base_planning_signature": base_planning_signature,
+                "base_context_signature": self._context_signature(
+                    state, source_revisions, planning_signature=base_planning_signature,
+                ),
+                "base_state_revision": bytes_revision(deck_payload),
+                "source_entries": entries,
+                "source_ids": {entry["id"] for entry in entries},
+                "source_revisions": source_revisions,
+                "input_hashes": input_hashes,
+                "authority_text": authority_text,
+            }
+        finally:
+            lease.release()
 
     def _require_current_inputs(self, context: dict[str, Any]) -> None:
         try:

@@ -26,6 +26,7 @@ from scripts.deck_workflow import (
     atomic_write_state,
     command_apply_initial_html_candidate,
     command_approve_plan,
+    command_capture_request,
     command_configure_sections,
     command_initialize,
     command_submit_plan,
@@ -377,6 +378,43 @@ class HtmlGenerationServiceTests(unittest.TestCase):
                 self.assertIn("変更", terminal.error or "")
                 for path, payload in backup.items():
                     (self.root / path).write_bytes(payload)
+
+    def test_snapshot_lease_rejects_supported_request_writer_during_capture(self) -> None:
+        request = self.root / "REQUEST.md"
+        original = request.read_bytes()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def snapshot_hook(phase: str) -> None:
+            self.assertEqual(phase, "request-snapshotted")
+            entered.set()
+            release.wait(timeout=5)
+
+        adapter = FakeHtmlGenerationAdapter()
+        service = HtmlGenerationService(
+            self.root,
+            adapter=adapter,
+            browser_validator=fake_browser_validator,
+            snapshot_hook=snapshot_hook,
+        )
+        self.assertEqual(service.start().status, "running")
+        self.assertTrue(entered.wait(timeout=2))
+        try:
+            with self.assertRaises(WorkflowError):
+                command_capture_request(
+                    self.root,
+                    load_state(self.root),
+                    text="# Request\n\nconcurrent update\n",
+                )
+            self.assertEqual(request.read_bytes(), original)
+        finally:
+            release.set()
+
+        terminal = self.wait_for_terminal(service)
+        self.assertEqual(terminal.status, "succeeded", terminal.error)
+        self.assertEqual(len(adapter.workspaces), 1)
+        self.assertEqual((adapter.workspaces[0] / "inputs/REQUEST.md").read_bytes(), original)
+        self.assertTrue(service.candidate().id)
 
     def _change_project_title(self) -> None:
         state = load_state(self.root)

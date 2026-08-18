@@ -383,16 +383,26 @@ def content_approval_digest(document_revision_value: str, registry_revision_valu
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def load_state(root: Path) -> dict[str, Any]:
-    path = root / STATE_RELATIVE
+def load_state_from_payload(root: Path, payload: bytes) -> dict[str, Any]:
+    """Parse and validate deck state from bytes already fixed by the caller."""
+
     try:
-        state = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        state = yaml.safe_load(payload.decode("utf-8-sig"))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise WorkflowError(f"Cannot read deck.yaml: {exc}") from exc
     if not isinstance(state, dict):
         raise WorkflowError("deck.yaml root must be a mapping")
     validate_state(root, state)
     return state
+
+
+def load_state(root: Path) -> dict[str, Any]:
+    path = root / STATE_RELATIVE
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise WorkflowError(f"Cannot read deck.yaml: {exc}") from exc
+    return load_state_from_payload(root, payload)
 
 
 def validate_state(root: Path, state: dict[str, Any]) -> None:
@@ -951,16 +961,25 @@ def planning_action_artifact_paths(root: Path, state: dict[str, Any]) -> tuple[P
     )
 
 
-def planning_review_signature(root: Path, state: dict[str, Any]) -> str:
-    """Hash an unambiguous canonical record of the exact planning review inputs."""
+def planning_review_signature_from_payloads(
+    root: Path,
+    state: dict[str, Any],
+    payloads: Mapping[Path, bytes | None],
+) -> str:
+    """Hash planning inputs from caller-owned bytes without rereading the repository."""
 
     root = root.resolve()
+    normalized_payloads = {Path(path).resolve(): payload for path, payload in payloads.items()}
     artifacts: list[dict[str, Any]] = []
     review_paths = ((root / STATE_RELATIVE).resolve(), *planning_artifact_paths(root, state))
     for path in review_paths:
+        if path not in normalized_payloads:
+            raise WorkflowError(
+                f"Planning signature payload is missing: {path.relative_to(root).as_posix()}"
+            )
         relative = path.relative_to(root).as_posix()
-        if path.is_file():
-            payload = path.read_bytes()
+        payload = normalized_payloads[path]
+        if payload is not None:
             artifacts.append({
                 "path": relative,
                 "status": "present",
@@ -984,6 +1003,18 @@ def planning_review_signature(root: Path, state: dict[str, Any]) -> str:
         canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def planning_review_signature(root: Path, state: dict[str, Any]) -> str:
+    """Hash an unambiguous canonical record of the exact planning review inputs."""
+
+    root = root.resolve()
+    review_paths = ((root / STATE_RELATIVE).resolve(), *planning_artifact_paths(root, state))
+    payloads = {
+        path: path.read_bytes() if path.is_file() else None
+        for path in review_paths
+    }
+    return planning_review_signature_from_payloads(root, state, payloads)
 
 
 def planning_is_ready(root: Path, state: dict[str, Any]) -> bool:
